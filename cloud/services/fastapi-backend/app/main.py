@@ -10,6 +10,10 @@ from app.routers import nodes as nodes_router
 from app.routers import readings as readings_router
 from app.routers import risk as risk_router
 from app.routers import alerts as alerts_router
+from app.routers import map as map_router
+from app.routers import users as users_router
+from app.routers import system as system_router
+from app.routers import reports as reports_router
 from app.utils.metrics import router as metrics_router
 from app.utils.response import (
     http_exception_handler,
@@ -43,6 +47,10 @@ app.include_router(nodes_router.router)
 app.include_router(readings_router.router)
 app.include_router(risk_router.router)
 app.include_router(alerts_router.router)
+app.include_router(map_router.router)
+app.include_router(users_router.router)
+app.include_router(system_router.router)
+app.include_router(reports_router.router)
 app.include_router(metrics_router)
 
 
