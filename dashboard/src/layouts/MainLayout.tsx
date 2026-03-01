@@ -10,8 +10,11 @@ import {
   ChevronLeft,
   ChevronRight,
   Activity,
+  Wifi,
+  WifiOff,
 } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 const navItems = [
   { path: '/', label: 'Map', icon: Map },
@@ -24,6 +27,7 @@ const navItems = [
 export default function MainLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const { user, isAuthenticated, logout } = useAuthStore();
+  const { isConnected } = useWebSocket();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -92,6 +96,15 @@ export default function MainLayout() {
             </h1>
           </div>
           <div className="flex items-center gap-4">
+            {isConnected ? (
+              <span className="flex items-center gap-1 text-xs text-risk-green">
+                <Wifi className="w-3 h-3" /> Live
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-xs text-risk-orange">
+                <WifiOff className="w-3 h-3" /> Reconnecting...
+              </span>
+            )}
             <span className="text-sm text-text-secondary">
               {user?.full_name || user?.email}
             </span>
