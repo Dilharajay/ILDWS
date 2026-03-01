@@ -110,7 +110,7 @@ def test_metrics_endpoint():
     """GET /metrics returns prometheus format."""
     resp = client.get("/metrics")
     assert resp.status_code == 200
-    assert "mlinf_" in resp.text or "python_" in resp.text
+    assert "ilews_ml_" in resp.text or "python_" in resp.text
 
 
 # ── Scorer tests ────────────────────────────────────────────────────────

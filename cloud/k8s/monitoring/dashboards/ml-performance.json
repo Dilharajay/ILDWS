@@ -1,0 +1,49 @@
+{
+  "dashboard": {
+    "title": "ILEWS ML Performance",
+    "uid": "ilews-ml-performance",
+    "panels": [
+      {
+        "title": "Inference Requests/sec",
+        "type": "timeseries",
+        "targets": [{"expr": "rate(ilews_ml_inference_requests_total[5m])"}],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "title": "Inference Latency (p95)",
+        "type": "timeseries",
+        "targets": [
+          {"expr": "histogram_quantile(0.50, rate(ilews_ml_inference_latency_seconds_bucket[5m]))", "legendFormat": "p50"},
+          {"expr": "histogram_quantile(0.95, rate(ilews_ml_inference_latency_seconds_bucket[5m]))", "legendFormat": "p95"},
+          {"expr": "histogram_quantile(0.99, rate(ilews_ml_inference_latency_seconds_bucket[5m]))", "legendFormat": "p99"}
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "title": "Current Risk Levels",
+        "type": "table",
+        "targets": [{"expr": "ilews_ml_current_risk_level"}],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "title": "Model Version",
+        "type": "stat",
+        "targets": [{"expr": "ilews_ml_model_version_info"}],
+        "gridPos": {"h": 4, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "title": "Risk Level Distribution",
+        "type": "piechart",
+        "targets": [
+          {"expr": "count(ilews_ml_current_risk_level{level=\"GREEN\"} > 0)", "legendFormat": "GREEN"},
+          {"expr": "count(ilews_ml_current_risk_level{level=\"YELLOW\"} > 0)", "legendFormat": "YELLOW"},
+          {"expr": "count(ilews_ml_current_risk_level{level=\"ORANGE\"} > 0)", "legendFormat": "ORANGE"},
+          {"expr": "count(ilews_ml_current_risk_level{level=\"RED\"} > 0)", "legendFormat": "RED"}
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+      }
+    ],
+    "time": {"from": "now-1h", "to": "now"},
+    "refresh": "10s"
+  }
+}

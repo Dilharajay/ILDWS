@@ -15,7 +15,7 @@ from app.routers import users as users_router
 from app.routers import system as system_router
 from app.routers import reports as reports_router
 from app.routers import websocket as ws_router
-from app.utils.metrics import router as metrics_router
+from app.utils.metrics import router as metrics_router, MetricsMiddleware
 from app.utils.response import (
     http_exception_handler,
     generic_exception_handler,
@@ -40,6 +40,7 @@ if settings.ENVIRONMENT == "development":
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(MetricsMiddleware)
 
 
 app.include_router(auth.router)

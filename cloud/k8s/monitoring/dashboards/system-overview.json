@@ -1,0 +1,46 @@
+{
+  "dashboard": {
+    "title": "ILEWS System Overview",
+    "uid": "ilews-system-overview",
+    "panels": [
+      {
+        "title": "Active RED Alerts",
+        "type": "stat",
+        "targets": [{"expr": "ilews_active_red_alerts_total"}],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "title": "WebSocket Connections",
+        "type": "stat",
+        "targets": [{"expr": "ilews_active_websocket_connections"}],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+      },
+      {
+        "title": "HTTP Requests/sec",
+        "type": "timeseries",
+        "targets": [{"expr": "rate(ilews_http_requests_total[5m])"}],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "title": "API Health",
+        "type": "stat",
+        "targets": [{"expr": "up{job=~\"ilews.*\"}"}],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 4}
+      },
+      {
+        "title": "Data Ingestion Latency",
+        "type": "timeseries",
+        "targets": [{"expr": "histogram_quantile(0.95, rate(ilews_etl_end_to_end_ingestion_latency_seconds_bucket[5m]))"}],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "title": "HTTP Request Latency (p95)",
+        "type": "timeseries",
+        "targets": [{"expr": "histogram_quantile(0.95, rate(ilews_http_request_duration_seconds_bucket[5m]))"}],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      }
+    ],
+    "time": {"from": "now-1h", "to": "now"},
+    "refresh": "10s"
+  }
+}

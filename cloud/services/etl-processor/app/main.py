@@ -123,9 +123,11 @@ async def health_handler(request):
 
 async def metrics_handler(request):
     """GET /metrics endpoint in Prometheus format."""
+    from app.metrics import get_metrics_response
+    body, content_type = get_metrics_response()
     return web.Response(
-        body=generate_latest(),
-        content_type=CONTENT_TYPE_LATEST,
+        body=body,
+        content_type=content_type,
     )
 
 

@@ -1,0 +1,47 @@
+{
+  "dashboard": {
+    "title": "ILEWS Sensor Network",
+    "uid": "ilews-sensor-network",
+    "panels": [
+      {
+        "title": "MQTT Messages Received/sec",
+        "type": "timeseries",
+        "targets": [{"expr": "rate(ilews_etl_mqtt_messages_received_total[5m])"}],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "title": "Valid vs Invalid Messages",
+        "type": "timeseries",
+        "targets": [
+          {"expr": "rate(ilews_etl_mqtt_messages_valid_total[5m])", "legendFormat": "valid"},
+          {"expr": "rate(ilews_etl_mqtt_messages_invalid_total[5m])", "legendFormat": "invalid"}
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "title": "Duplicate Messages",
+        "type": "stat",
+        "targets": [{"expr": "increase(ilews_etl_mqtt_messages_duplicate_total[1h])"}],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8}
+      },
+      {
+        "title": "Active Sensor Nodes",
+        "type": "stat",
+        "targets": [{"expr": "count(count by (node_id) (ilews_etl_mqtt_messages_received_total))"}],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8}
+      },
+      {
+        "title": "Ingestion Latency",
+        "type": "timeseries",
+        "targets": [
+          {"expr": "histogram_quantile(0.50, rate(ilews_etl_end_to_end_ingestion_latency_seconds_bucket[5m]))", "legendFormat": "p50"},
+          {"expr": "histogram_quantile(0.95, rate(ilews_etl_end_to_end_ingestion_latency_seconds_bucket[5m]))", "legendFormat": "p95"},
+          {"expr": "histogram_quantile(0.99, rate(ilews_etl_end_to_end_ingestion_latency_seconds_bucket[5m]))", "legendFormat": "p99"}
+        ],
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12}
+      }
+    ],
+    "time": {"from": "now-1h", "to": "now"},
+    "refresh": "10s"
+  }
+}

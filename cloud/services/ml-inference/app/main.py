@@ -130,7 +130,9 @@ async def reload_model_endpoint():
 @app.get("/metrics")
 async def metrics():
     """Prometheus metrics endpoint."""
+    from app.metrics import get_metrics_response
+    body, content_type = get_metrics_response()
     return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST,
+        content=body,
+        media_type=content_type,
     )
