@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ilews-ingress
+  namespace: ilews-production
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    networking.gke.io/managed-certificates: "ilews-managed-cert"
+    kubernetes.io/ingress.global-static-ip-name: "ilews-static-ip"
+spec:
+  tls:
+    - hosts:
+        - api.ilews.gov
+      secretName: ilews-tls
+  rules:
+    - host: api.ilews.gov
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fastapi-backend
+                port:
+                  number: 80
