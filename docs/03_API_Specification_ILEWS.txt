@@ -1,0 +1,905 @@
+================================================================================
+       INTELLIGENT LANDSLIDE EARLY WARNING SYSTEM (ILEWS)
+       API SPECIFICATION
+       Document Version: 1.0 | Status: Draft
+       Date: 2026-02-28
+================================================================================
+
+DOCUMENT CONTROL
+----------------
+Prepared By   : ILEWS Engineering Team
+API Standard  : OpenAPI 3.1.0 (REST)
+Base URL      : https://api.ilews.gov/v1
+Authentication: OAuth 2.0 Bearer Token (JWT)
+Classification: Restricted – For Official and Academic Use Only
+
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+1.  API Overview
+2.  Authentication
+3.  Common Response Formats
+4.  Error Codes
+5.  Sensor Nodes API
+6.  Sensor Readings API
+7.  Risk Scores API
+8.  Alerts API
+9.  Slopes & Map API
+10. Users & Roles API
+11. System Health API
+12. Reports API
+13. WebSocket API
+14. Rate Limits
+================================================================================
+
+
+1. API OVERVIEW
+----------------
+
+The ILEWS RESTful API provides programmatic access to all system data and
+control functions. It is built on FastAPI (Python) and follows REST principles
+with JSON request/response bodies. All endpoints are versioned under /v1.
+
+Design Principles:
+  - Stateless: No server-side session state; all auth via bearer token.
+  - Idempotent: PUT and DELETE operations are idempotent.
+  - Consistent: Unified envelope format for all responses.
+  - Secure: All endpoints require authentication; role-based access enforced.
+  - Auditable: All write operations logged with actor identity.
+
+API Environments:
+  Production : https://api.ilews.gov/v1
+  Staging    : https://staging-api.ilews.gov/v1
+  Development: http://localhost:8000/v1
+
+
+2. AUTHENTICATION
+------------------
+
+2.1 Obtaining a Token
+
+    POST /v1/auth/token
+
+    Request Body (application/x-www-form-urlencoded):
+      grant_type : "password"
+      username   : <user email>
+      password   : <password>
+      client_id  : "ilews-web"
+
+    Response (200 OK):
+      {
+        "access_token": "eyJhbGciOiJSUzI1NiIsIn...",
+        "token_type": "bearer",
+        "expires_in": 28800,
+        "refresh_token": "dGhpcyBpcyBhIHJlZnJlc2...",
+        "scope": "openid profile"
+      }
+
+2.2 Using the Token
+    Include in all requests as an HTTP header:
+      Authorization: Bearer <access_token>
+
+2.3 Token Refresh
+    POST /v1/auth/refresh
+    Body: { "refresh_token": "<refresh_token>" }
+    Returns: New access_token and refresh_token pair.
+
+2.4 Token Expiry
+    Access tokens expire after 8 hours of inactivity.
+    Refresh tokens expire after 30 days.
+
+2.5 Roles and Permissions
+
+    +---------------------+--------+----------+---------+-----------+-----------+
+    | Endpoint Category   | Admin  | Operator | Analyst | Gov Viewer| Read-Only |
+    +---------------------+--------+----------+---------+-----------+-----------+
+    | Sensor Nodes (read) | YES    | YES      | YES     | YES       | YES       |
+    | Sensor Nodes (write)| YES    | NO       | NO      | NO        | NO        |
+    | Readings (read)     | YES    | YES      | YES     | YES       | YES       |
+    | Readings (export)   | YES    | YES      | YES     | NO        | NO        |
+    | Risk Scores (read)  | YES    | YES      | YES     | YES       | YES       |
+    | Alerts (read)       | YES    | YES      | YES     | YES       | NO        |
+    | Alerts (ack)        | YES    | YES      | NO      | NO        | NO        |
+    | Alerts (override)   | YES    | YES      | NO      | NO        | NO        |
+    | Slopes (read)       | YES    | YES      | YES     | YES       | YES       |
+    | Slopes (write)      | YES    | NO       | NO      | NO        | NO        |
+    | Users (all)         | YES    | NO       | NO      | NO        | NO        |
+    | System Health       | YES    | YES      | NO      | NO        | NO        |
+    | Reports             | YES    | YES      | YES     | YES       | NO        |
+    +---------------------+--------+----------+---------+-----------+-----------+
+
+
+3. COMMON RESPONSE FORMATS
+---------------------------
+
+3.1 Success Response Envelope
+    All successful responses return the following structure:
+    {
+      "status": "success",
+      "data": { ... },       -- Requested data object or array
+      "meta": {              -- Pagination and request metadata (if applicable)
+        "page": 1,
+        "per_page": 50,
+        "total": 243,
+        "total_pages": 5
+      },
+      "timestamp": "2026-02-28T08:30:00Z"
+    }
+
+3.2 Error Response Envelope
+    {
+      "status": "error",
+      "error": {
+        "code": "ERR_NODE_NOT_FOUND",
+        "message": "Sensor node with ID 'X99' does not exist.",
+        "details": { ... }   -- Optional additional context
+      },
+      "timestamp": "2026-02-28T08:30:00Z"
+    }
+
+3.3 Pagination
+    List endpoints support query parameters:
+      ?page=1&per_page=50
+    Default: page=1, per_page=50. Maximum: per_page=500.
+
+
+4. ERROR CODES
+---------------
+
++----------------------------+--------+-------------------------------------+
+| Error Code                 | HTTP   | Description                         |
++----------------------------+--------+-------------------------------------+
+| ERR_UNAUTHORIZED           | 401    | Missing or invalid bearer token     |
+| ERR_FORBIDDEN              | 403    | Authenticated but insufficient role |
+| ERR_NODE_NOT_FOUND         | 404    | Sensor node ID does not exist       |
+| ERR_SLOPE_NOT_FOUND        | 404    | Slope ID does not exist             |
+| ERR_ALERT_NOT_FOUND        | 404    | Alert ID does not exist             |
+| ERR_USER_NOT_FOUND         | 404    | User ID does not exist              |
+| ERR_VALIDATION             | 422    | Request body failed validation      |
+| ERR_DUPLICATE_NODE         | 409    | Node ID already registered          |
+| ERR_DUPLICATE_USER         | 409    | User email already registered       |
+| ERR_RATE_LIMIT             | 429    | Too many requests                   |
+| ERR_INTERNAL               | 500    | Internal server error               |
+| ERR_SERVICE_UNAVAILABLE    | 503    | Inference or dependency down        |
++----------------------------+--------+-------------------------------------+
+
+
+5. SENSOR NODES API
+--------------------
+
+5.1 List All Nodes
+
+    GET /v1/nodes
+    Description: Returns all registered sensor nodes.
+    Auth Required: YES | Min Role: Read-Only
+
+    Query Parameters:
+      slope_id   (string, optional) -- Filter by slope
+      status     (string, optional) -- Filter by: active, inactive, error
+      page, per_page
+
+    Response 200:
+    {
+      "status": "success",
+      "data": [
+        {
+          "node_id": "A1",
+          "slope_id": "SLOPE_BKT_01",
+          "name": "Node Alpha-1",
+          "latitude": 3.1520,
+          "longitude": 101.7120,
+          "depth_config": [0.5, 1.0, 2.0],
+          "status": "active",
+          "last_seen": "2026-02-28T08:25:00Z",
+          "battery_voltage": 12.4,
+          "firmware_version": "1.3.2",
+          "installed_date": "2025-06-15"
+        }
+      ],
+      "meta": { "page": 1, "per_page": 50, "total": 12, "total_pages": 1 }
+    }
+
+5.2 Get Single Node
+
+    GET /v1/nodes/{node_id}
+    Auth Required: YES | Min Role: Read-Only
+
+    Path Parameter:
+      node_id (string) -- e.g., "A1"
+
+    Response 200:
+    { "status": "success", "data": { <node_object> } }
+
+    Response 404:
+    { "status": "error", "error": { "code": "ERR_NODE_NOT_FOUND", ... } }
+
+5.3 Register New Node
+
+    POST /v1/nodes
+    Auth Required: YES | Min Role: System Admin
+    Description: Registers a new sensor node. Manual coordinate input required.
+
+    Request Body:
+    {
+      "node_id":        "A5",
+      "slope_id":       "SLOPE_BKT_01",
+      "name":           "Node Alpha-5",
+      "latitude":       3.1535,
+      "longitude":      101.7145,
+      "depth_config":   [0.5, 1.0, 2.0],
+      "installed_date": "2026-02-28"
+    }
+
+    Validation Rules:
+      - node_id: unique, 2-8 chars, alphanumeric + hyphen
+      - slope_id: must reference existing slope
+      - latitude: -90.0 to 90.0
+      - longitude: -180.0 to 180.0
+      - depth_config: array of 1-5 float values (metres)
+
+    Response 201:
+    { "status": "success", "data": { <created_node_object> } }
+
+5.4 Update Node
+
+    PUT /v1/nodes/{node_id}
+    Auth Required: YES | Min Role: System Admin
+    Description: Updates node metadata (coordinates, name, status).
+
+    Request Body: (all fields optional, partial update supported)
+    {
+      "name":      "Node Alpha-5 Updated",
+      "latitude":  3.1536,
+      "longitude": 101.7146,
+      "status":    "inactive"
+    }
+
+    Response 200: { "status": "success", "data": { <updated_node_object> } }
+
+5.5 Delete Node
+
+    DELETE /v1/nodes/{node_id}
+    Auth Required: YES | Min Role: System Admin
+    Note: Soft delete only. Historical data is retained. Node removed from map.
+
+    Response 200: { "status": "success", "data": { "deleted": true } }
+
+
+6. SENSOR READINGS API
+------------------------
+
+6.1 Get Latest Reading for a Node
+
+    GET /v1/nodes/{node_id}/readings/latest
+    Auth Required: YES | Min Role: Read-Only
+    Description: Returns most recent validated sensor reading.
+
+    Response 200:
+    {
+      "status": "success",
+      "data": {
+        "node_id": "A1",
+        "timestamp": "2026-02-28T08:25:00Z",
+        "soil_moisture_pct": [45.2, 52.1, 60.8],   -- Depths [0.5m, 1.0m, 2.0m]
+        "rainfall_mm": 0.2,
+        "tilt_x_deg": 0.01,
+        "tilt_y_deg": 0.00,
+        "accel_x_ms2": 0.02,
+        "accel_y_ms2": 0.01,
+        "accel_z_ms2": 9.81,
+        "vibration_hz": 12.5,
+        "battery_voltage": 12.4,
+        "rssi_dbm": -85,
+        "data_quality": "valid"
+      }
+    }
+
+6.2 Get Historical Readings
+
+    GET /v1/nodes/{node_id}/readings
+    Auth Required: YES | Min Role: Read-Only
+
+    Query Parameters:
+      start_time (ISO 8601, required) -- e.g., 2026-02-27T00:00:00Z
+      end_time   (ISO 8601, required) -- e.g., 2026-02-28T00:00:00Z
+      resample   (string, optional)   -- "raw", "1min", "15min", "1h"
+                                         Default: "raw"
+      page, per_page
+
+    Response 200:
+    {
+      "status": "success",
+      "data": [
+        { <reading_object_1> },
+        { <reading_object_2> },
+        ...
+      ],
+      "meta": { ... }
+    }
+
+6.3 Export Readings
+
+    GET /v1/nodes/{node_id}/readings/export
+    Auth Required: YES | Min Role: Operator
+    Description: Returns time-series data as downloadable file.
+
+    Query Parameters:
+      start_time (required)
+      end_time   (required)
+      format     (string) -- "csv" or "json". Default: "csv"
+
+    Response: File download (Content-Disposition: attachment)
+    Content-Type: text/csv OR application/json
+
+6.4 Get Readings for Entire Slope
+
+    GET /v1/slopes/{slope_id}/readings/latest
+    Auth Required: YES | Min Role: Read-Only
+    Description: Returns latest reading from all nodes on a slope.
+
+    Response: Array of latest reading objects, one per node.
+
+
+7. RISK SCORES API
+-------------------
+
+7.1 Get Current Risk Score for a Slope
+
+    GET /v1/slopes/{slope_id}/risk
+    Auth Required: YES | Min Role: Read-Only
+
+    Response 200:
+    {
+      "status": "success",
+      "data": {
+        "slope_id": "SLOPE_BKT_01",
+        "risk_level": "ORANGE",
+        "risk_score": 0.72,
+        "computed_at": "2026-02-28T08:15:00Z",
+        "contributing_nodes": ["A1", "A2", "A3"],
+        "model_version": "lstm_v3.1.2",
+        "next_update_at": "2026-02-28T08:30:00Z"
+      }
+    }
+
+7.2 Get Risk Score History
+
+    GET /v1/slopes/{slope_id}/risk/history
+    Auth Required: YES | Min Role: Read-Only
+
+    Query Parameters:
+      start_time (required)
+      end_time   (required)
+      page, per_page
+
+    Response: Array of risk score objects with timestamp.
+
+7.3 Get Risk for All Slopes (Map Overview)
+
+    GET /v1/slopes/risk/overview
+    Auth Required: YES | Min Role: Read-Only
+    Description: Returns current risk level for all slopes. Used by map
+                 interface to render colour-coded overlays.
+
+    Response 200:
+    {
+      "status": "success",
+      "data": [
+        {
+          "slope_id": "SLOPE_BKT_01",
+          "slope_name": "Bukit Bintang North Slope",
+          "risk_level": "ORANGE",
+          "risk_score": 0.72,
+          "latitude_centroid": 3.1520,
+          "longitude_centroid": 101.7120,
+          "node_count": 5,
+          "active_nodes": 5,
+          "computed_at": "2026-02-28T08:15:00Z"
+        },
+        ...
+      ]
+    }
+
+
+8. ALERTS API
+--------------
+
+8.1 List Alerts
+
+    GET /v1/alerts
+    Auth Required: YES | Min Role: Read-Only (filtered for role)
+
+    Query Parameters:
+      slope_id     (string, optional)
+      level        (string, optional) -- GREEN, YELLOW, ORANGE, RED
+      status       (string, optional) -- active, acknowledged, resolved
+      start_time   (ISO 8601, optional)
+      end_time     (ISO 8601, optional)
+      page, per_page
+
+    Response 200:
+    {
+      "status": "success",
+      "data": [
+        {
+          "alert_id": "ALT-2026-001247",
+          "slope_id": "SLOPE_BKT_01",
+          "slope_name": "Bukit Bintang North Slope",
+          "level": "RED",
+          "risk_score": 0.91,
+          "triggered_at": "2026-02-28T07:45:00Z",
+          "status": "acknowledged",
+          "acknowledged_by": "operator@ndmc.gov",
+          "acknowledged_at": "2026-02-28T07:47:12Z",
+          "resolved_at": null,
+          "notification_channels": {
+            "sms": "delivered",
+            "push": "delivered",
+            "siren": "activated"
+          }
+        }
+      ]
+    }
+
+8.2 Get Single Alert
+
+    GET /v1/alerts/{alert_id}
+    Auth Required: YES | Min Role: Read-Only
+
+8.3 Acknowledge Alert
+
+    POST /v1/alerts/{alert_id}/acknowledge
+    Auth Required: YES | Min Role: Operator
+    Description: Marks an alert as acknowledged by the requesting user.
+
+    Request Body: (optional)
+    { "notes": "Evacuation order issued. NDMC contacted." }
+
+    Response 200:
+    {
+      "status": "success",
+      "data": {
+        "alert_id": "ALT-2026-001247",
+        "status": "acknowledged",
+        "acknowledged_by": "operator@ndmc.gov",
+        "acknowledged_at": "2026-02-28T07:47:12Z"
+      }
+    }
+
+8.4 Resolve Alert
+
+    POST /v1/alerts/{alert_id}/resolve
+    Auth Required: YES | Min Role: Operator
+
+    Request Body:
+    { "resolution_notes": "Slope stable. Risk dropped below threshold." }
+
+    Response 200: Alert object with status = "resolved".
+
+8.5 Manual Override Alert (Force RED)
+
+    POST /v1/alerts/override
+    Auth Required: YES | Min Role: Operator
+    Description: Allows an operator to manually trigger a RED alert for
+                 a slope regardless of ML score (emergency use).
+
+    Request Body:
+    {
+      "slope_id": "SLOPE_BKT_01",
+      "reason":   "Visual inspection confirmed crack formation."
+    }
+
+    Response 201: Created alert object with source = "manual_override".
+
+8.6 Get Notification Status for Alert
+
+    GET /v1/alerts/{alert_id}/notifications
+    Auth Required: YES | Min Role: Operator
+
+    Response 200:
+    {
+      "status": "success",
+      "data": {
+        "alert_id": "ALT-2026-001247",
+        "sms": {
+          "status": "delivered",
+          "recipients": ["60123456789", "60198765432"],
+          "sent_at": "2026-02-28T07:45:08Z"
+        },
+        "push": {
+          "status": "delivered",
+          "devices_reached": 14,
+          "sent_at": "2026-02-28T07:45:09Z"
+        },
+        "siren": {
+          "status": "activated",
+          "gateway_id": "GW_BKT_01",
+          "activated_at": "2026-02-28T07:45:22Z"
+        }
+      }
+    }
+
+
+9. SLOPES & MAP API
+---------------------
+
+9.1 List All Slopes
+
+    GET /v1/slopes
+    Auth Required: YES | Min Role: Read-Only
+
+    Response 200:
+    {
+      "status": "success",
+      "data": [
+        {
+          "slope_id": "SLOPE_BKT_01",
+          "name": "Bukit Bintang North Slope",
+          "description": "High-density residential area slope",
+          "location_name": "Kuala Lumpur, Malaysia",
+          "latitude_centroid": 3.1520,
+          "longitude_centroid": 101.7120,
+          "area_m2": 45000,
+          "node_count": 5,
+          "monitoring_status": "active",
+          "created_at": "2025-06-01T00:00:00Z"
+        }
+      ]
+    }
+
+9.2 Register New Slope
+
+    POST /v1/slopes
+    Auth Required: YES | Min Role: System Admin
+
+    Request Body:
+    {
+      "slope_id":           "SLOPE_PGJ_02",
+      "name":               "Petaling Jaya South Corridor",
+      "description":        "Highway corridor slope, high traffic exposure",
+      "location_name":      "Petaling Jaya, Selangor",
+      "latitude_centroid":  3.1069,
+      "longitude_centroid": 101.6069,
+      "area_m2":            32000
+    }
+
+    Response 201: Created slope object.
+
+9.3 Get Map Data (All Nodes + Risk Overlay)
+
+    GET /v1/map/data
+    Auth Required: YES | Min Role: Read-Only
+    Description: Returns all node positions with current risk level and
+                 polygon/heatmap overlay data for dashboard map rendering.
+
+    Response 200:
+    {
+      "status": "success",
+      "data": {
+        "nodes": [
+          {
+            "node_id":    "A1",
+            "slope_id":   "SLOPE_BKT_01",
+            "latitude":   3.1520,
+            "longitude":  101.7120,
+            "risk_level": "ORANGE",
+            "risk_score": 0.72,
+            "last_seen":  "2026-02-28T08:25:00Z",
+            "status":     "active"
+          }
+        ],
+        "risk_zones": [
+          {
+            "slope_id":   "SLOPE_BKT_01",
+            "risk_level": "ORANGE",
+            "risk_score": 0.72,
+            "zone_polygon": [
+              [3.1510, 101.7110],
+              [3.1530, 101.7110],
+              [3.1530, 101.7130],
+              [3.1510, 101.7130]
+            ],
+            "zone_radius_m": 250
+          }
+        ],
+        "generated_at": "2026-02-28T08:28:00Z"
+      }
+    }
+
+9.4 Update Node Coordinates
+
+    PUT /v1/nodes/{node_id}/location
+    Auth Required: YES | Min Role: System Admin
+    Description: Updates manually entered geographic coordinates for a node.
+
+    Request Body:
+    {
+      "latitude":  3.1536,
+      "longitude": 101.7146,
+      "coordinate_source": "topographic_survey",
+      "survey_reference":  "JUPEM-2026-0012"
+    }
+
+    Response 200: Updated node object.
+
+
+10. USERS & ROLES API
+-----------------------
+
+10.1 List Users
+
+    GET /v1/users
+    Auth Required: YES | Min Role: System Admin
+
+    Response 200:
+    {
+      "status": "success",
+      "data": [
+        {
+          "user_id":      "USR-0001",
+          "email":        "operator@ndmc.gov",
+          "name":         "Ahmad bin Razali",
+          "role":         "operator",
+          "organisation": "NDMC",
+          "phone":        "+60123456789",
+          "status":       "active",
+          "last_login":   "2026-02-28T06:00:00Z",
+          "created_at":   "2025-07-01T00:00:00Z"
+        }
+      ]
+    }
+
+10.2 Create User
+
+    POST /v1/users
+    Auth Required: YES | Min Role: System Admin
+
+    Request Body:
+    {
+      "email":        "analyst@university.edu.my",
+      "name":         "Dr Siti Norhaliza",
+      "role":         "analyst",
+      "organisation": "Universiti Malaya",
+      "phone":        "+60198765432"
+    }
+
+    Response 201: Created user object. Activation email sent to user.
+
+10.3 Update User Role
+
+    PUT /v1/users/{user_id}/role
+    Auth Required: YES | Min Role: System Admin
+
+    Request Body: { "role": "operator" }
+    Response 200: Updated user object.
+
+10.4 Deactivate User
+
+    DELETE /v1/users/{user_id}
+    Auth Required: YES | Min Role: System Admin
+    Note: Soft deactivation. User cannot login; audit log retained.
+
+    Response 200: { "status": "success", "data": { "deactivated": true } }
+
+
+11. SYSTEM HEALTH API
+-----------------------
+
+11.1 Get Overall System Health
+
+    GET /v1/system/health
+    Auth Required: YES | Min Role: Operator
+
+    Response 200:
+    {
+      "status": "success",
+      "data": {
+        "overall": "degraded",
+        "services": {
+          "mqtt_broker":        "healthy",
+          "etl_processor":      "healthy",
+          "ml_inference":       "degraded",
+          "fastapi_backend":    "healthy",
+          "timescaledb":        "healthy",
+          "redis_cache":        "healthy",
+          "notification_svc":   "healthy"
+        },
+        "node_summary": {
+          "total": 12,
+          "active": 11,
+          "offline": 1,
+          "error": 0
+        },
+        "data_lag_minutes": 3.2,
+        "last_checked": "2026-02-28T08:29:00Z"
+      }
+    }
+
+11.2 Get Node Health Details
+
+    GET /v1/nodes/{node_id}/health
+    Auth Required: YES | Min Role: Operator
+
+    Response 200:
+    {
+      "status": "success",
+      "data": {
+        "node_id":              "A1",
+        "connectivity":         "online",
+        "last_packet_received": "2026-02-28T08:25:00Z",
+        "packet_loss_24h_pct":  1.2,
+        "battery_voltage":      12.4,
+        "battery_status":       "good",
+        "solar_input":          "charging",
+        "firmware_version":     "1.3.2",
+        "firmware_up_to_date":  true,
+        "enclosure_temp_c":     34.2
+      }
+    }
+
+11.3 Trigger OTA Firmware Update
+
+    POST /v1/nodes/{node_id}/firmware/update
+    Auth Required: YES | Min Role: System Admin
+
+    Request Body: { "firmware_version": "1.4.0" }
+
+    Response 202 (Accepted):
+    {
+      "status": "success",
+      "data": {
+        "job_id": "OTA-2026-0789",
+        "node_id": "A1",
+        "target_version": "1.4.0",
+        "status": "queued"
+      }
+    }
+
+
+12. REPORTS API
+----------------
+
+12.1 Generate Report
+
+    POST /v1/reports/generate
+    Auth Required: YES | Min Role: Analyst
+
+    Request Body:
+    {
+      "report_type":  "weekly_summary",
+      "slope_ids":    ["SLOPE_BKT_01", "SLOPE_PGJ_02"],
+      "start_date":   "2026-02-21",
+      "end_date":     "2026-02-28",
+      "format":       "pdf",
+      "email_to":     ["director@ndmc.gov"]
+    }
+
+    Report Types:
+      - "daily_summary"   : Alert count, node health, risk trend
+      - "weekly_summary"  : As above + FAR metrics, data coverage
+      - "monthly_summary" : Full performance report
+      - "incident_report" : Detailed report for a specific alert event
+      - "raw_data_export" : Sensor readings CSV export
+
+    Response 202:
+    {
+      "status": "success",
+      "data": {
+        "report_id": "RPT-2026-00321",
+        "status":    "generating",
+        "eta_seconds": 30
+      }
+    }
+
+12.2 Get Report Status / Download
+
+    GET /v1/reports/{report_id}
+    Auth Required: YES | Min Role: Analyst
+
+    Response 200 (when ready):
+    {
+      "status": "success",
+      "data": {
+        "report_id":    "RPT-2026-00321",
+        "status":       "ready",
+        "download_url": "https://storage.ilews.gov/reports/RPT-2026-00321.pdf",
+        "expires_at":   "2026-03-07T08:30:00Z"
+      }
+    }
+
+
+13. WEBSOCKET API
+------------------
+
+13.1 Overview
+    The dashboard connects to a WebSocket endpoint for real-time data streaming.
+    Server pushes events to connected clients without polling.
+
+    Endpoint: wss://api.ilews.gov/v1/ws
+    Auth: Pass bearer token as query param on connect:
+          wss://api.ilews.gov/v1/ws?token=<access_token>
+
+13.2 Event Types (Server → Client)
+
+    a. RISK_UPDATE: Risk level change for a slope
+       {
+         "event": "RISK_UPDATE",
+         "data": {
+           "slope_id":   "SLOPE_BKT_01",
+           "risk_level": "RED",
+           "risk_score": 0.91,
+           "timestamp":  "2026-02-28T07:45:00Z"
+         }
+       }
+
+    b. NEW_READING: New sensor reading arrived (selected nodes only)
+       {
+         "event": "NEW_READING",
+         "data": { <reading_object> }
+       }
+
+    c. ALERT_TRIGGERED: New alert created
+       {
+         "event": "ALERT_TRIGGERED",
+         "data": { <alert_object> }
+       }
+
+    d. NODE_STATUS_CHANGE: Node went offline or came back online
+       {
+         "event": "NODE_STATUS_CHANGE",
+         "data": {
+           "node_id": "A2",
+           "status":  "offline",
+           "timestamp": "2026-02-28T07:00:00Z"
+         }
+       }
+
+    e. SYSTEM_HEALTH_UPDATE: Periodic system health snapshot
+       {
+         "event": "SYSTEM_HEALTH_UPDATE",
+         "data": { <health_object> }
+       }
+
+13.3 Client → Server Commands
+
+    Subscribe to slope events:
+    { "action": "subscribe", "slope_ids": ["SLOPE_BKT_01", "SLOPE_PGJ_02"] }
+
+    Unsubscribe:
+    { "action": "unsubscribe", "slope_ids": ["SLOPE_PGJ_02"] }
+
+    Ping (keepalive):
+    { "action": "ping" }
+    Server responds: { "event": "pong", "timestamp": "..." }
+
+
+14. RATE LIMITS
+----------------
+
+Rate limits are applied per authenticated user (by user_id from JWT).
+
++------------------------------+------------------+
+| Endpoint Group               | Rate Limit       |
++------------------------------+------------------+
+| Authentication endpoints     | 10 req/min       |
+| Read endpoints (GET)         | 300 req/min      |
+| Write endpoints (POST/PUT)   | 60 req/min       |
+| Export endpoints             | 5 req/min        |
+| Report generation            | 10 req/hour      |
+| WebSocket connections        | 5 concurrent/user|
++------------------------------+------------------+
+
+Rate limit headers returned on all responses:
+  X-RateLimit-Limit:     300
+  X-RateLimit-Remaining: 247
+  X-RateLimit-Reset:     1709111460    (Unix timestamp of window reset)
+
+When rate limit exceeded:
+  HTTP 429 Too Many Requests
+  { "status": "error", "error": { "code": "ERR_RATE_LIMIT",
+    "message": "Rate limit exceeded. Try again in 43 seconds." } }
+
+================================================================================
+END OF DOCUMENT – API Specification v1.0
+================================================================================

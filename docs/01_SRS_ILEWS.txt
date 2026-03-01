@@ -1,0 +1,643 @@
+================================================================================
+       INTELLIGENT LANDSLIDE EARLY WARNING SYSTEM (ILEWS)
+       SOFTWARE REQUIREMENTS SPECIFICATION (SRS)
+       Document Version: 1.0 | Status: Draft
+       Date: 2026-02-28
+================================================================================
+
+DOCUMENT CONTROL
+----------------
+Prepared By   : ILEWS Engineering Team
+Reviewed By   : [Pending Government Review Board]
+Classification: Restricted – For Official and Academic Use Only
+Standard      : IEEE 830-1998 (Software Requirements Specification Standard)
+
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+1.  Introduction
+2.  Overall Description
+3.  Stakeholder Register
+4.  Functional Requirements
+5.  Non-Functional Requirements
+6.  System Constraints
+7.  External Interface Requirements
+8.  Use Case Descriptions
+9.  Risk & Safety Requirements
+10. Compliance & Regulatory Considerations
+================================================================================
+
+
+1. INTRODUCTION
+---------------
+
+1.1 Purpose
+    This Software Requirements Specification (SRS) defines the complete
+    functional and non-functional requirements for the Intelligent Landslide
+    Early Warning System (ILEWS). It serves as the primary contractual and
+    technical reference for all development, procurement, and deployment
+    activities associated with the project.
+
+1.2 Project Overview
+    ILEWS is a mission-critical, real-time IoT and AI-driven platform designed
+    to detect and predict slope failures before they occur. The system integrates
+    geotechnical sensing hardware embedded in at-risk slopes with edge computing
+    gateways, a cloud-based deep learning inference engine, and a public-facing
+    alert dashboard. Its primary objective is to provide a minimum of two (2)
+    hours of lead time prior to a predicted slope failure event, enabling
+    organised evacuation and emergency response.
+
+1.3 Scope
+    ILEWS encompasses the following software domains:
+      - Embedded firmware on IoT sensor nodes (ESP32 microcontrollers)
+      - Edge gateway software (Python-based data aggregation and local inference)
+      - Cloud data ingestion, storage, and machine learning pipeline
+      - RESTful API server for system integration
+      - Web and mobile dashboard for monitoring and alerting
+      - Notification and alarm dispatch services
+
+    OUT OF SCOPE:
+      - Physical hardware manufacturing and installation
+      - Civil or geotechnical engineering surveys
+      - Emergency response coordination protocols (handled by partner agencies)
+
+1.4 Definitions and Acronyms
+    ILEWS   – Intelligent Landslide Early Warning System
+    IoT     – Internet of Things
+    LoRaWAN – Long Range Wide Area Network
+    MQTT    – Message Queuing Telemetry Transport
+    FAR     – False Alarm Rate
+    SRS     – Software Requirements Specification
+    MCU     – Microcontroller Unit
+    GCP     – Google Cloud Platform
+    ML      – Machine Learning
+    DL      – Deep Learning
+    API     – Application Programming Interface
+    ETL     – Extract, Transform, Load
+    SWCC    – Soil Water Characteristic Curve
+    GKE     – Google Kubernetes Engine
+    FCM     – Firebase Cloud Messaging
+    NDMC    – National Disaster Management Centre
+    PWP     – Pore Water Pressure
+
+1.5 References
+    - IEEE 830-1998: IEEE Recommended Practice for SRS
+    - LoRaWAN Specification v1.0.4 (LoRa Alliance)
+    - MQTT Protocol Specification v5.0 (OASIS)
+    - UNDRR Sendai Framework for Disaster Risk Reduction 2015–2030
+    - GCP Architecture Framework (Google, 2024)
+
+
+2. OVERALL DESCRIPTION
+-----------------------
+
+2.1 System Perspective
+    ILEWS operates as a distributed, hierarchical system composed of three
+    interconnected computational layers:
+
+    Layer 1 – IoT Sensing Layer:
+      Autonomous, solar-powered sensor nodes are physically embedded in monitored
+      slopes at defined depths and locations. Each node collects multi-parameter
+      geotechnical data (soil moisture, tilt, rainfall, vibration, pore pressure)
+      at configurable intervals and transmits data packets via LoRaWAN radio
+      protocol to the nearest edge gateway.
+
+    Layer 2 – Edge Computing Layer:
+      A LoRa gateway co-located at or near the monitored slope aggregates incoming
+      sensor packets. An onboard single-board computer (Raspberry Pi 4 or Nvidia
+      Jetson Nano) runs a lightweight local inference model to enable immediate
+      "Red Alert" triggering even in the absence of cloud connectivity. Data is
+      locally buffered in SQLite during internet outages.
+
+    Layer 3 – Cloud Platform Layer:
+      Sensor data streams via 4G/LTE or satellite (Starlink) to a cloud-hosted
+      platform (GCP). The cloud layer performs long-term storage, complex deep
+      learning model training and inference, API hosting, dashboard rendering,
+      and multi-channel alert dispatch.
+
+2.2 System Functions Summary
+    - Continuous multi-sensor data acquisition
+    - Real-time data transmission and ingestion
+    - Local (edge) and remote (cloud) risk inference
+    - Visual slope risk mapping with manual coordinate input
+    - Colour-coded alert visualisation on map interface
+    - Multi-channel alert dispatch (SMS, push notification, siren trigger)
+    - Historical data archiving and trend analysis
+    - Stakeholder dashboard (web and mobile)
+
+2.3 User Classes
+    Class A – Emergency Operations Operators:
+      Monitor dashboard 24/7. Require real-time alert visibility and one-click
+      acknowledgement tools. Low technical background assumed.
+
+    Class B – Geotechnical / Data Scientists:
+      Access raw sensor feeds, ML model performance dashboards, and EDA tools.
+      High technical background.
+
+    Class C – Government & Regulatory Officials:
+      Access summary reports, system health metrics, and compliance logs.
+      Non-technical audience.
+
+    Class D – System Administrators:
+      Manage node configurations, user accounts, firmware updates, and
+      cloud infrastructure. High technical background.
+
+    Class E – Local Communities (Indirect):
+      Recipients of SMS and push alerts. No direct system interaction.
+
+2.4 Operating Environment
+    - Cloud: GCP (asia-southeast or nearest regional zone)
+    - Edge: Raspberry Pi 4 running Raspberry Pi OS Lite (Debian-based)
+    - Embedded: ESP32 running custom firmware (Arduino/ESP-IDF framework)
+    - Web Dashboard: Modern browsers (Chrome 110+, Firefox 110+, Edge 110+)
+    - Mobile: Android 10+ / iOS 14+ (Progressive Web App or native)
+    - Connectivity: LoRaWAN (868/915 MHz), 4G LTE, Starlink fallback
+
+
+3. STAKEHOLDER REGISTER
+------------------------
+
++------------------------------+----------------------------------+-----------------------+
+| Stakeholder                  | Interest in System               | Influence Level       |
++------------------------------+----------------------------------+-----------------------+
+| National Disaster Mgmt Centre| Alert reliability, lead time     | Very High             |
+| Railway Authorities          | Track-adjacent slope monitoring  | High                  |
+| Highway Ministries           | Road corridor risk alerts        | High                  |
+| Municipal Councils           | Community evacuation triggers    | High                  |
+| Local Communities            | Timely warnings, safe evacuation | Medium (beneficiary)  |
+| Insurance Companies          | Risk data for premium assessment | Medium                |
+| Academic Research Bodies     | Data access, model validation    | Medium                |
+| System Administrators        | Uptime, maintainability          | High                  |
++------------------------------+----------------------------------+-----------------------+
+
+
+4. FUNCTIONAL REQUIREMENTS
+---------------------------
+
+The following requirements use the notation FR-XXX where XXX is the unique
+requirement identifier. Priority is rated: [CRITICAL], [HIGH], [MEDIUM], [LOW].
+
+4.1 Sensor Data Acquisition (FR-ACQ)
+
+  FR-ACQ-001 [CRITICAL]
+    The system SHALL acquire readings from the following sensors on each node:
+    soil moisture (capacitive), rainfall (tipping bucket), acceleration/gyroscope
+    (MPU6050), tilt/inclinometer, and piezoelectric geophone.
+
+  FR-ACQ-002 [CRITICAL]
+    Each sensor node SHALL wake from deep sleep every ten (10) minutes, acquire
+    all sensor readings within 200 milliseconds, transmit data within 1 second,
+    and return to deep sleep.
+
+  FR-ACQ-003 [HIGH]
+    The system SHALL support configurable sampling intervals via remote
+    over-the-air (OTA) commands from the edge gateway or cloud.
+
+  FR-ACQ-004 [HIGH]
+    In the event of an anomaly detection (threshold breach), the node SHALL
+    increase its sampling rate to once per minute for a configurable alarm
+    duration.
+
+  FR-ACQ-005 [MEDIUM]
+    Each transmitted data packet SHALL include: node_id, Unix timestamp,
+    soil_moisture (%), rainfall_volume (mm), tilt_x, tilt_y (degrees),
+    acceleration_xyz (m/s²), vibration_frequency (Hz), battery_voltage (V),
+    and signal_strength (RSSI).
+
+4.2 LoRaWAN Communication (FR-LORA)
+
+  FR-LORA-001 [CRITICAL]
+    Sensor nodes SHALL communicate with the edge gateway exclusively via
+    LoRaWAN operating on the 868 MHz (EU) or 915 MHz (Americas/Asia) band,
+    as applicable to the deployment region.
+
+  FR-LORA-002 [CRITICAL]
+    The system SHALL support Opportunistic Networking (Oppnet) to allow
+    sensor nodes to relay data through peer nodes when direct gateway
+    communication is unavailable.
+
+  FR-LORA-003 [HIGH]
+    The LoRa communication layer SHALL use AES-128 encryption as specified
+    by the LoRaWAN v1.0.4 standard.
+
+  FR-LORA-004 [HIGH]
+    The edge gateway SHALL acknowledge receipt of each data packet. Nodes
+    SHALL retry transmission up to three (3) times before logging a
+    communication failure.
+
+4.3 Edge Gateway Processing (FR-EDGE)
+
+  FR-EDGE-001 [CRITICAL]
+    The edge gateway SHALL run a local MQTT broker (Mosquitto) to receive
+    and queue incoming sensor data packets.
+
+  FR-EDGE-002 [CRITICAL]
+    The edge gateway SHALL perform data validation: checking for null values,
+    NaN values, out-of-range readings, and timestamp integrity.
+
+  FR-EDGE-003 [CRITICAL]
+    The edge gateway SHALL buffer all validated data locally in an SQLite
+    database when the upstream internet connection is unavailable.
+
+  FR-EDGE-004 [CRITICAL]
+    When internet connectivity is restored, the edge gateway SHALL
+    automatically forward all buffered data to the cloud in chronological
+    order without data loss.
+
+  FR-EDGE-005 [CRITICAL]
+    The edge gateway SHALL run a simplified local ML inference model capable
+    of issuing a "Red Alert" independently of cloud connectivity.
+
+  FR-EDGE-006 [HIGH]
+    Upon local Red Alert, the edge gateway SHALL activate any locally
+    connected siren or alarm hardware via a designated GPIO output within
+    thirty (30) seconds of trigger condition detection.
+
+4.4 Cloud Data Ingestion (FR-INGEST)
+
+  FR-INGEST-001 [CRITICAL]
+    The cloud platform SHALL expose an MQTT broker endpoint for receiving
+    data from edge gateways.
+
+  FR-INGEST-002 [CRITICAL]
+    An ETL pipeline SHALL process each incoming message within five (5)
+    seconds of receipt, validating schema, enriching with metadata, and
+    writing to the primary time-series database.
+
+  FR-INGEST-003 [HIGH]
+    The ingestion pipeline SHALL be idempotent: duplicate packets (from
+    edge buffer retransmission) SHALL be deduplicated using packet ID
+    and timestamp.
+
+4.5 Data Storage (FR-STORE)
+
+  FR-STORE-001 [CRITICAL]
+    All time-series sensor data SHALL be persisted in TimeScaleDB
+    (PostgreSQL extension) partitioned by slope_id and date.
+
+  FR-STORE-002 [HIGH]
+    Hot data (last 24 hours) SHALL be cached in Redis for low-latency
+    dashboard queries.
+
+  FR-STORE-003 [MEDIUM]
+    Data older than ninety (90) days SHALL be automatically archived to
+    cloud object storage (GCS) in Parquet format for cost efficiency.
+
+  FR-STORE-004 [HIGH]
+    The system SHALL retain raw sensor data for a minimum of seven (7) years
+    to support post-event forensic analysis and regulatory compliance.
+
+4.6 Machine Learning & Prediction (FR-ML)
+
+  FR-ML-001 [CRITICAL]
+    The cloud ML pipeline SHALL produce a risk prediction score (0.0–1.0)
+    for each monitored slope updated at minimum every fifteen (15) minutes.
+
+  FR-ML-002 [CRITICAL]
+    The ML model SHALL classify slope risk into four (4) discrete levels:
+      - GREEN  : Low risk (score 0.0–0.39)
+      - YELLOW : Elevated risk (score 0.40–0.64)
+      - ORANGE : High risk (score 0.65–0.84)
+      - RED    : Critical / Imminent failure (score 0.85–1.0)
+
+  FR-ML-003 [CRITICAL]
+    The system SHALL achieve a minimum lead time of two (2) hours between
+    a RED alert and actual slope failure in field validation scenarios.
+
+  FR-ML-004 [CRITICAL]
+    The False Alarm Rate (FAR) SHALL not exceed five percent (5%) measured
+    over any rolling thirty (30) day period.
+
+  FR-ML-005 [HIGH]
+    The ML pipeline SHALL support model retraining triggered by new labelled
+    event data. Retraining SHALL not disrupt live inference services.
+
+  FR-ML-006 [HIGH]
+    All model versions SHALL be tracked and versioned using MLflow. Rollback
+    to a previous model version SHALL be achievable within ten (10) minutes.
+
+  FR-ML-007 [MEDIUM]
+    The system SHALL perform Exploratory Data Analysis functions including:
+    seasonal decomposition, lag correlation, CUSUM/Bayesian changepoint
+    detection, and soil water characteristic curve (SWCC) hysteresis plotting.
+
+4.7 Slope Map & Visualisation (FR-MAP)
+
+  FR-MAP-001 [CRITICAL]
+    The system SHALL provide a web-based map interface displaying all monitored
+    slope nodes at their manually entered geographic coordinates.
+
+  FR-MAP-002 [CRITICAL]
+    Node coordinates SHALL be entered manually by an authorised administrator
+    via a coordinate input form (latitude/longitude or local grid reference).
+    GPS hardware is NOT used for node location.
+
+  FR-MAP-003 [CRITICAL]
+    Each node on the map SHALL display a colour-coded risk indicator
+    corresponding to its current ML risk level (GREEN/YELLOW/ORANGE/RED).
+
+  FR-MAP-004 [CRITICAL]
+    A colour-coded risk zone (heatmap or polygon overlay) SHALL be rendered
+    around each node to visually represent the spatial extent of the predicted
+    risk area on the map.
+
+  FR-MAP-005 [HIGH]
+    Clicking on a node marker on the map SHALL open a detail panel displaying:
+    node ID, last-seen timestamp, current sensor readings, risk score, and
+    alert history.
+
+  FR-MAP-006 [HIGH]
+    The map SHALL auto-refresh risk visualisation at a minimum of every
+    sixty (60) seconds without requiring a full page reload.
+
+  FR-MAP-007 [MEDIUM]
+    The map interface SHALL support zoom, pan, and layer toggling
+    (e.g., satellite imagery, topographic overlay).
+
+4.8 Alert & Notification System (FR-ALERT)
+
+  FR-ALERT-001 [CRITICAL]
+    Upon a RED risk classification, the system SHALL dispatch alerts via
+    ALL of the following channels simultaneously:
+      a. Dashboard visual alert (flashing overlay + audible tone)
+      b. SMS to registered emergency contacts (via Twilio or equivalent)
+      c. Push notification to registered mobile devices (via FCM)
+
+  FR-ALERT-002 [CRITICAL]
+    Alert dispatch SHALL occur within sixty (60) seconds of the risk
+    classification reaching RED level.
+
+  FR-ALERT-003 [HIGH]
+    ORANGE level alerts SHALL trigger dashboard notifications and optional
+    SMS/push based on operator configuration.
+
+  FR-ALERT-004 [HIGH]
+    All alerts SHALL include: slope ID, alert level, timestamp, predicted
+    risk score, and a direct link to the map view of the affected slope.
+
+  FR-ALERT-005 [HIGH]
+    Operators SHALL be able to acknowledge alerts through the dashboard,
+    with acknowledgement logged including operator ID and timestamp.
+
+  FR-ALERT-006 [MEDIUM]
+    The system SHALL support configurable alert suppression windows to
+    prevent repeated alerts for the same ongoing event.
+
+4.9 User Management & Access Control (FR-AUTH)
+
+  FR-AUTH-001 [CRITICAL]
+    The system SHALL implement role-based access control (RBAC) with the
+    following roles: System Administrator, Operations Operator, Data Analyst,
+    Government Viewer, and Read-Only Stakeholder.
+
+  FR-AUTH-002 [HIGH]
+    All user authentication SHALL use industry-standard OAuth 2.0 / OpenID
+    Connect. Passwords SHALL never be stored in plaintext.
+
+  FR-AUTH-003 [HIGH]
+    All API endpoints SHALL require a valid bearer token. Unauthenticated
+    requests SHALL be rejected with HTTP 401.
+
+  FR-AUTH-004 [MEDIUM]
+    Session tokens SHALL expire after eight (8) hours of inactivity.
+
+4.10 Reporting (FR-REPORT)
+
+  FR-REPORT-001 [HIGH]
+    The system SHALL generate automated PDF/CSV reports on a configurable
+    schedule (daily, weekly, monthly) for stakeholder distribution.
+
+  FR-REPORT-002 [HIGH]
+    Reports SHALL include: alert summary, sensor uptime statistics, FAR
+    metrics, risk trend charts, and node health status.
+
+  FR-REPORT-003 [MEDIUM]
+    Authorised users SHALL be able to export raw sensor data for any date
+    range in CSV or JSON format.
+
+
+5. NON-FUNCTIONAL REQUIREMENTS
+--------------------------------
+
+5.1 Performance
+
+  NFR-PERF-001 [CRITICAL]
+    End-to-end latency from sensor reading to dashboard risk update
+    SHALL NOT exceed five (5) minutes under normal operating conditions.
+
+  NFR-PERF-002 [CRITICAL]
+    The API server SHALL handle a minimum of five hundred (500) concurrent
+    requests with a p95 response time under 500 milliseconds.
+
+  NFR-PERF-003 [HIGH]
+    The ML inference engine SHALL return a risk score for each slope
+    within two (2) seconds of receiving a new data batch.
+
+5.2 Reliability & Availability
+
+  NFR-REL-001 [CRITICAL]
+    The cloud platform SHALL maintain 99.9% uptime (≤8.7 hours downtime/year)
+    for all critical services (ingestion, inference, alerting).
+
+  NFR-REL-002 [CRITICAL]
+    The edge gateway SHALL continue issuing local alerts for a minimum of
+    72 hours during complete cloud/internet outage using battery backup.
+
+  NFR-REL-003 [HIGH]
+    The system SHALL implement automated health checks for all services
+    with self-healing restart mechanisms via Kubernetes.
+
+5.3 Security
+
+  NFR-SEC-001 [CRITICAL]
+    All data in transit SHALL be encrypted using TLS 1.3 minimum.
+
+  NFR-SEC-002 [CRITICAL]
+    All data at rest in the cloud SHALL be encrypted using AES-256.
+
+  NFR-SEC-003 [HIGH]
+    The system SHALL log all access, configuration changes, and alert
+    events in an immutable audit trail.
+
+  NFR-SEC-004 [HIGH]
+    Penetration testing SHALL be performed prior to public deployment
+    and annually thereafter.
+
+5.4 Scalability
+
+  NFR-SCALE-001 [HIGH]
+    The cloud architecture SHALL horizontally scale to support monitoring
+    of up to one thousand (1,000) sensor nodes across multiple slopes
+    without architectural changes.
+
+  NFR-SCALE-002 [HIGH]
+    The system SHALL support onboarding of new slope monitoring sites
+    within four (4) hours by an administrator.
+
+5.5 Maintainability
+
+  NFR-MAINT-001 [HIGH]
+    Sensor node firmware SHALL support Over-the-Air (OTA) updates pushed
+    from the cloud platform without physical access to the node.
+
+  NFR-MAINT-002 [HIGH]
+    All services SHALL be containerised using Docker to ensure environment
+    consistency across development, staging, and production.
+
+  NFR-MAINT-003 [MEDIUM]
+    System documentation SHALL be maintained and versioned alongside
+    source code in the project repository.
+
+5.6 Usability
+
+  NFR-USE-001 [HIGH]
+    The dashboard SHALL be operable by a non-technical emergency operator
+    with less than two (2) hours of training.
+
+  NFR-USE-002 [MEDIUM]
+    The dashboard SHALL be responsive and usable on tablets and mobile
+    devices with screen sizes of 7 inches and above.
+
+
+6. SYSTEM CONSTRAINTS
+----------------------
+
+  CON-001: Each sensor node MUST have a hardware cost not exceeding USD $200
+           to enable economically viable dense deployment.
+
+  CON-002: All nodes must operate entirely on solar and battery power. No
+           connection to the electrical grid can be assumed.
+
+  CON-003: LoRa transmission must function within the licensed frequency
+           bands of the deployment country.
+
+  CON-004: The system must function in areas with intermittent or zero
+           cellular coverage; edge-only operation must be fully supported.
+
+  CON-005: All software components must be deployable on open-source or
+           commercially licensed tools already specified in the architecture.
+
+  CON-006: Node location on the map is determined entirely by manual
+           coordinate entry; no GPS hardware is used or assumed.
+
+
+7. EXTERNAL INTERFACE REQUIREMENTS
+------------------------------------
+
+7.1 Hardware Interfaces
+    - ESP32 MCU via I2C bus (MPU6050, inclinometer)
+    - ESP32 analog inputs (soil moisture, pressure sensors)
+    - ESP32 interrupt pins (rain gauge, geophone)
+    - LoRa radio module (SPI interface to ESP32)
+    - Raspberry Pi GPIO (siren/alarm relay output)
+    - MPPT charge controller (battery monitoring via I2C/UART)
+
+7.2 Software Interfaces
+    - MQTT v5.0 protocol for sensor-to-gateway and gateway-to-cloud comms
+    - GCP Cloud IoT Core (or Pub/Sub) for cloud ingestion endpoint
+    - Twilio REST API for SMS dispatch
+    - Firebase Cloud Messaging (FCM) API for push notifications
+    - MLflow REST API for model registry management
+    - Prometheus metrics endpoint for monitoring scraping
+
+7.3 Communication Interfaces
+    - LoRaWAN (868/915 MHz): sensor nodes to edge gateway
+    - 4G LTE: edge gateway to cloud (primary)
+    - Starlink / VSAT: edge gateway to cloud (backup)
+    - HTTPS/TLS 1.3: all cloud API communications
+    - WebSocket: real-time dashboard data feed
+
+
+8. USE CASE DESCRIPTIONS
+--------------------------
+
+UC-01: Continuous Monitoring (Normal Operation)
+  Actor: System (automated)
+  Precondition: All nodes powered and connected.
+  Flow: Nodes wake → acquire sensor data → transmit via LoRa →
+        gateway receives → validates → forwards to cloud →
+        ML engine scores → dashboard updates risk colour →
+        all stakeholders see GREEN status.
+  Postcondition: Data logged; dashboard current.
+
+UC-02: Elevated Risk Detection
+  Actor: System (automated)
+  Precondition: Soil moisture and tilt readings exceed warning thresholds.
+  Flow: ML engine raises score to ORANGE → dashboard turns ORANGE →
+        operations operator receives dashboard notification → operator
+        acknowledges and increases manual monitoring frequency.
+  Postcondition: Alert logged; operator on standby.
+
+UC-03: Red Alert – Imminent Failure
+  Actor: System (automated) + Operations Operator
+  Precondition: Risk score crosses RED threshold (≥0.85).
+  Flow: Cloud triggers RED classification → alert dispatched via SMS,
+        push, and dashboard within 60 seconds → edge gateway activates
+        local siren → operators acknowledge on dashboard →
+        NDMC notified → evacuation order initiated by authorised authority.
+  Postcondition: Alert record saved; evacuation in progress.
+
+UC-04: Internet Outage – Edge-Only Mode
+  Actor: System (automated)
+  Precondition: Cloud connectivity lost at edge gateway.
+  Flow: Gateway detects connectivity loss → switches to local inference →
+        data buffered in SQLite → local siren triggers if RED locally →
+        upon reconnection, buffered data forwarded to cloud in order.
+  Postcondition: No data lost; cloud catches up on reconnection.
+
+UC-05: Administrator Adds New Monitoring Node
+  Actor: System Administrator
+  Precondition: Physical node installed; admin logged in.
+  Flow: Admin opens Node Management → enters node ID, slope ID,
+        manual lat/long coordinates → saves → node appears on map →
+        admin confirms sensor readings appearing in dashboard.
+  Postcondition: New node active on map and in monitoring pipeline.
+
+
+9. RISK & SAFETY REQUIREMENTS
+-------------------------------
+
+  RSR-001: The system SHALL NOT issue a false evacuation order without
+           human authorisation. The system raises alerts; evacuation
+           decisions are made by authorised human operators.
+
+  RSR-002: If any critical service (ingestion, inference, alerting)
+           fails, the system SHALL automatically notify the System
+           Administrator within five (5) minutes via SMS and email.
+
+  RSR-003: A manual RED ALERT override button SHALL be available on the
+           dashboard for operators to trigger alerts independently of
+           automated ML decisions.
+
+  RSR-004: All alert dispatch failures (SMS not delivered, push not sent)
+           SHALL be logged and retried a minimum of three (3) times.
+
+  RSR-005: The system SHALL maintain a degraded-mode operation plan
+           such that even with cloud failure, local edge alerts continue
+           to function for 72 hours on battery power.
+
+
+10. COMPLIANCE & REGULATORY CONSIDERATIONS
+-------------------------------------------
+
+  - UNDRR Sendai Framework for Disaster Risk Reduction 2015–2030:
+    The system is designed in alignment with Priority 3 (Investing in
+    disaster risk reduction) and Priority 4 (Enhancing preparedness).
+
+  - National Telecommunications Regulations: LoRa radio frequency
+    usage must comply with national spectrum authority licensing
+    requirements of the deployment country.
+
+  - Data Privacy: Sensor data is non-personal geotechnical data and
+    does not fall under personal data protection regulations. User
+    account data (operator names, phone numbers) must comply with
+    applicable national data protection law (e.g., PDPA, GDPR equivalent).
+
+  - Government Audit Requirements: System logs and alert records must
+    be retained for a minimum of seven (7) years to satisfy government
+    audit and post-disaster inquiry requirements.
+
+================================================================================
+END OF DOCUMENT – SRS v1.0
+================================================================================

@@ -6,6 +6,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    SmallInteger,
     String,
     Text,
     func,
@@ -20,30 +21,27 @@ class AlertNotification(Base):
     __tablename__ = "alert_notifications"
     __table_args__ = (
         CheckConstraint(
-            "channel IN ('sms', 'push', 'email', 'webhook', 'dashboard')",
-            name="ck_alert_notifications_channel",
+            "channel IN ('sms', 'push', 'siren', 'email', 'websocket')",
+            name="chk_notif_channel",
         ),
         CheckConstraint(
-            "status IN ('pending', 'sent', 'delivered', 'failed', 'retrying')",
-            name="ck_alert_notifications_status",
+            "status IN ('pending', 'sent', 'delivered', 'failed')",
+            name="chk_notif_status",
         ),
     )
 
     notification_id = Column(BigInteger, primary_key=True, autoincrement=True)
     alert_id = Column(
-        BigInteger, ForeignKey("alerts.alert_id", ondelete="CASCADE"), nullable=False
+        String(30), ForeignKey("alerts.alert_id", ondelete="CASCADE"), nullable=False
     )
-    user_id = Column(BigInteger, ForeignKey("users.user_id"), nullable=False)
     channel = Column(String(20), nullable=False)
-    status = Column(String(20), server_default="pending", nullable=False)
-    recipient_address = Column(String(200), nullable=False)
-    sent_at = Column(DateTime(timezone=True))
+    recipient = Column(String(200))
+    status = Column(String(20), nullable=False, server_default="pending")
+    attempt_count = Column(SmallInteger, nullable=False, server_default="0")
+    last_attempt_at = Column(DateTime(timezone=True))
     delivered_at = Column(DateTime(timezone=True))
-    failure_reason = Column(Text)
-    retry_count = Column(BigInteger, server_default="0")
-    provider_message_id = Column(String(100))
+    error_message = Column(Text)
     provider_response = Column(JSONB)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     alert = relationship("Alert", back_populates="notifications")
-    user = relationship("User", back_populates="notifications")

@@ -8,6 +8,9 @@ from app.models.alerts import Alert
 from app.models.alert_notifications import AlertNotification
 from app.models.users import User
 from app.models.audit_logs import AuditLog
+from app.models.node_health_snapshots import NodeHealthSnapshot
+from app.models.model_registry import ModelRegistry
+from app.models.reports import Report
 
 __all__ = [
     "Slope",
@@ -18,4 +21,7 @@ __all__ = [
     "AlertNotification",
     "User",
     "AuditLog",
+    "NodeHealthSnapshot",
+    "ModelRegistry",
+    "Report",
 ]
