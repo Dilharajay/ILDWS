@@ -1,11 +1,21 @@
-FROM python:3.12-slim
+# ---- Build stage ----
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir --prefix=/install .
+
+# ---- Runtime stage ----
+FROM python:3.11-slim
+
+RUN groupadd -r ilews && useradd -r -g ilews -d /app -s /sbin/nologin ilews
 
 WORKDIR /app
-
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
-
+COPY --from=builder /install /usr/local
 COPY . .
+
+RUN chown -R ilews:ilews /app
+USER ilews
 
 EXPOSE 8000
 
