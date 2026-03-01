@@ -92,7 +92,13 @@ async def create_alert(
     db.add(alert)
     await db.commit()
     await db.refresh(alert)
-    return _alert_dict(alert)
+    result = _alert_dict(alert)
+
+    # Broadcast to WebSocket clients
+    from app.utils.event_broadcaster import broadcast_alert_triggered
+    await broadcast_alert_triggered(result)
+
+    return result
 
 
 async def acknowledge_alert(
@@ -157,7 +163,12 @@ async def manual_override_alert(
     db.add(alert)
     await db.commit()
     await db.refresh(alert)
-    return _alert_dict(alert)
+    result = _alert_dict(alert)
+
+    from app.utils.event_broadcaster import broadcast_alert_triggered
+    await broadcast_alert_triggered(result)
+
+    return result
 
 
 async def mark_false_alarm(

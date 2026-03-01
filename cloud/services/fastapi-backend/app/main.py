@@ -14,6 +14,7 @@ from app.routers import map as map_router
 from app.routers import users as users_router
 from app.routers import system as system_router
 from app.routers import reports as reports_router
+from app.routers import websocket as ws_router
 from app.utils.metrics import router as metrics_router
 from app.utils.response import (
     http_exception_handler,
@@ -51,6 +52,7 @@ app.include_router(map_router.router)
 app.include_router(users_router.router)
 app.include_router(system_router.router)
 app.include_router(reports_router.router)
+app.include_router(ws_router.router)
 app.include_router(metrics_router)
 
 

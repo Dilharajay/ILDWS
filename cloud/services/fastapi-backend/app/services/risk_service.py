@@ -154,4 +154,14 @@ async def update_risk_score(
         except Exception:
             pass
 
+    # Broadcast to WebSocket clients
+    from app.utils.event_broadcaster import broadcast_risk_update
+    await broadcast_risk_update(
+        slope_id=data.slope_id,
+        risk_level=data.risk_level,
+        risk_score=float(data.risk_score),
+        timestamp=data.timestamp.isoformat(),
+        redis=redis,
+    )
+
     return result
