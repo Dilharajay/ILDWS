@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # Firebase Cloud Messaging
     FCM_SERVER_KEY: str = ""
 
+    # Service-to-service API key (for internal endpoints like ETL ingestion)
+    SERVICE_API_KEY: str = "change-me-service-key"
+
     # Runtime
     ENVIRONMENT: str = "development"
 

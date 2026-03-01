@@ -7,6 +7,7 @@ from app.config import settings
 from app.routers import auth
 from app.routers import slopes as slopes_router
 from app.routers import nodes as nodes_router
+from app.routers import readings as readings_router
 from app.utils.metrics import router as metrics_router
 from app.utils.response import (
     http_exception_handler,
@@ -37,6 +38,7 @@ if settings.ENVIRONMENT == "development":
 app.include_router(auth.router)
 app.include_router(slopes_router.router)
 app.include_router(nodes_router.router)
+app.include_router(readings_router.router)
 app.include_router(metrics_router)
 
 

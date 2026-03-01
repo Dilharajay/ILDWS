@@ -1,0 +1,1332 @@
+================================================================================
+       INTELLIGENT LANDSLIDE EARLY WARNING SYSTEM (ILEWS)
+       CLAUDE CODE DEVELOPMENT PROMPTS
+       Version: 1.0 | Date: 2026-02-28
+================================================================================
+
+HOW TO USE THIS DOCUMENT
+--------------------------
+Each prompt below is numbered and self-contained. Enter them into Claude Code
+ONE AT A TIME. Wait for Claude Code to finish and confirm completion before
+moving to the next prompt. Do NOT paste multiple prompts at once.
+
+Prompts are grouped into PHASES. Each phase builds on the previous one.
+A [CHECKPOINT] is marked at the end of each phase -- verify the listed
+items before proceeding to the next phase.
+
+Estimated total prompts: 52
+Estimated development time: Varies by team size (solo: 6-10 weeks)
+
+================================================================================
+PHASE 0: PROJECT SCAFFOLD
+================================================================================
+
+--- PROMPT 0.1 ---
+Create the full project folder structure for a system called ILEWS
+(Intelligent Landslide Early Warning System). The project has three main
+layers: firmware (ESP32 IoT nodes), edge (Raspberry Pi gateway), and cloud
+(GCP-hosted microservices). Use this exact structure:
+
+ilews/
+├── firmware/
+│   ├── src/
+│   │   ├── main.cpp
+│   │   ├── sensors/
+│   │   ├── comms/
+│   │   └── power/
+│   ├── include/
+│   ├── platformio.ini
+│   └── README.md
+├── edge/
+│   ├── gateway_processor/
+│   ├── local_inference/
+│   ├── config/
+│   ├── requirements.txt
+│   └── README.md
+├── cloud/
+│   ├── services/
+│   │   ├── etl-processor/
+│   │   ├── fastapi-backend/
+│   │   ├── ml-inference/
+│   │   └── notification-svc/
+│   ├── ml/
+│   ├── k8s/
+│   ├── terraform/
+│   └── helm/
+├── dashboard/
+├── docs/
+├── .github/
+│   └── workflows/
+├── .gitignore
+├── docker-compose.yml
+└── README.md
+
+Create all folders and placeholder README.md files in each major folder.
+Add a root .gitignore covering Python, Node, C++, Terraform, and Docker files.
+
+
+--- PROMPT 0.2 ---
+In the root of the ilews/ project, create a docker-compose.yml file for
+local development that spins up these services:
+
+1. postgres (image: timescale/timescaledb:latest-pg16) on port 5432
+   with database name "ilews", user "ilews_dev", password "ilews_dev_pass"
+2. redis (image: redis:7.2-alpine) on port 6379
+3. mosquitto (MQTT broker, image: eclipse-mosquitto:2.0) on port 1883 and 9001
+4. mlflow (image: ghcr.io/mlflow/mlflow:v2.13.0) on port 5000
+   connected to a local ./mlflow-data volume
+
+Add a mosquitto config file at ./config/mosquitto.conf that allows anonymous
+connections on localhost for development only.
+
+Add a .env.example file at the project root listing all environment variables
+that will be needed across all services (database URL, Redis URL, MQTT
+credentials, Twilio keys, FCM keys, JWT secret). Use placeholder values.
+
+
+--- PROMPT 0.3 ---
+Create a Makefile in the ilews/ project root with the following targets:
+
+- make dev-up: starts docker-compose services
+- make dev-down: stops docker-compose services
+- make dev-logs: tails all docker-compose logs
+- make db-migrate: runs alembic database migrations (from cloud/services/fastapi-backend)
+- make db-seed: runs the seed data script
+- make test-all: runs pytest for all Python services and jest for dashboard
+- make lint: runs flake8 on all Python code and eslint on dashboard
+- make build-all: builds all Docker images
+- make edge-install: installs Python dependencies for the edge service
+- make firmware-build: runs platformio run in the firmware directory
+- make help: prints available targets with descriptions
+
+Include comments explaining each target.
+
+
+[CHECKPOINT 0]
+Verify before continuing:
+  [ ] ilews/ folder structure exists with all subdirectories
+  [ ] docker-compose.yml starts without errors (make dev-up)
+  [ ] .gitignore, .env.example, Makefile all present
+  [ ] Placeholder README.md files exist in all major directories
+
+
+================================================================================
+PHASE 1: DATABASE & MIGRATIONS
+================================================================================
+
+--- PROMPT 1.1 ---
+In cloud/services/fastapi-backend/, set up a Python project with:
+
+1. A pyproject.toml (or requirements.txt) including these dependencies:
+   fastapi, uvicorn, sqlalchemy, alembic, psycopg2-binary, asyncpg,
+   redis, pydantic, pydantic-settings, python-jose, passlib, bcrypt,
+   httpx, pytest, pytest-asyncio, pytest-cov, black, flake8
+
+2. A folder structure:
+   fastapi-backend/
+   ├── app/
+   │   ├── __init__.py
+   │   ├── main.py         -- FastAPI app entry point
+   │   ├── config.py       -- Settings using pydantic-settings
+   │   ├── database.py     -- SQLAlchemy async engine and session
+   │   ├── models/         -- SQLAlchemy ORM models
+   │   ├── schemas/        -- Pydantic schemas
+   │   ├── routers/        -- FastAPI route handlers
+   │   ├── services/       -- Business logic
+   │   └── utils/          -- Shared helpers
+   ├── migrations/         -- Alembic migrations
+   ├── tests/
+   ├── alembic.ini
+   └── Dockerfile
+
+3. app/config.py reading from environment variables:
+   DATABASE_URL, REDIS_URL, MQTT_HOST, MQTT_PORT, JWT_SECRET_KEY,
+   JWT_ALGORITHM (default RS256), ACCESS_TOKEN_EXPIRE_HOURS (default 8),
+   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER,
+   FCM_SERVER_KEY, ENVIRONMENT (default development)
+
+4. app/database.py with async SQLAlchemy engine and a get_db dependency.
+
+5. app/main.py with a FastAPI app instance, CORS middleware for development,
+   and a health check endpoint GET /health returning {"status": "ok"}.
+
+
+--- PROMPT 1.2 ---
+In cloud/services/fastapi-backend/app/models/, create SQLAlchemy ORM models
+for the ILEWS database. Create one file per model:
+
+slopes.py: Table "slopes" with columns:
+  slope_id (VARCHAR 20, PK), name (VARCHAR 100, NOT NULL),
+  description (TEXT), location_name (VARCHAR 200),
+  latitude_centroid (NUMERIC 9,6 NOT NULL), longitude_centroid (NUMERIC 9,6 NOT NULL),
+  area_m2 (NUMERIC 12,2), zone_polygon (JSONB),
+  monitoring_status (VARCHAR 20, default "active"),
+  risk_threshold_red (NUMERIC 4,2, default 0.85),
+  risk_threshold_orange (NUMERIC 4,2, default 0.65),
+  risk_threshold_yellow (NUMERIC 4,2, default 0.40),
+  created_at (TIMESTAMPTZ, default now()), updated_at (TIMESTAMPTZ), created_by (VARCHAR 100)
+
+sensor_nodes.py: Table "sensor_nodes" with columns:
+  node_id (VARCHAR 20, PK), slope_id (FK to slopes), name (VARCHAR 100),
+  latitude (NUMERIC 9,6 NOT NULL), longitude (NUMERIC 9,6 NOT NULL),
+  depth_config (ARRAY of NUMERIC, default [0.5, 1.0, 2.0]),
+  coordinate_source (VARCHAR 100), survey_reference (VARCHAR 100),
+  firmware_version (VARCHAR 20), installed_date (DATE),
+  status (VARCHAR 20, default "active"), is_deleted (BOOLEAN, default False),
+  created_at (TIMESTAMPTZ), updated_at (TIMESTAMPTZ)
+
+sensor_readings.py: Table "sensor_readings" (will be a TimescaleDB hypertable):
+  reading_id (BIGSERIAL), node_id (VARCHAR 20), slope_id (VARCHAR 20),
+  timestamp (TIMESTAMPTZ NOT NULL), received_at (TIMESTAMPTZ), packet_id (VARCHAR 40),
+  soil_moisture_d1_pct through d5_pct (NUMERIC 5,2 each, nullable),
+  rainfall_mm (NUMERIC 6,2), tilt_x_deg (NUMERIC 7,4), tilt_y_deg (NUMERIC 7,4),
+  accel_x_ms2, accel_y_ms2, accel_z_ms2 (NUMERIC 8,4 each),
+  vibration_hz (NUMERIC 8,3), vibration_amplitude (NUMERIC 8,4),
+  battery_voltage_v (NUMERIC 5,2), solar_input_w (NUMERIC 5,2), rssi_dbm (SMALLINT),
+  data_quality (VARCHAR 20, default "valid"), quality_flags (JSONB),
+  source (VARCHAR 20, default "lora")
+
+risk_scores.py, alerts.py, alert_notifications.py, users.py, audit_logs.py:
+  Create each with all columns as specified in the ILEWS Database Schema Design
+  document. Include all check constraints as SQLAlchemy CheckConstraint objects.
+
+Create app/models/__init__.py that imports all models.
+
+
+--- PROMPT 1.3 ---
+Set up Alembic in cloud/services/fastapi-backend/:
+
+1. Initialise Alembic with async support (env.py should use asyncio run_sync).
+
+2. Create the first migration file (001_initial_schema.py) that:
+   - Creates all tables from the ORM models
+   - Converts sensor_readings to a TimescaleDB hypertable using:
+     op.execute("SELECT create_hypertable('sensor_readings', 'timestamp', chunk_time_interval => INTERVAL '1 day')")
+   - Converts risk_scores to a hypertable with 7-day chunks
+   - Converts node_health_snapshots to a hypertable with 7-day chunks
+   - Creates all indexes listed in the Database Schema document
+   - Adds the deduplication unique index on sensor_readings (node_id, timestamp, packet_id)
+
+3. Create a second migration (002_retention_policies.py) that adds:
+   - TimescaleDB compression policy on sensor_readings after 7 days
+   - TimescaleDB retention policy on sensor_readings dropping chunks older than 90 days
+   - Comment noting that 90-day-old data should be archived to GCS first
+
+4. Create cloud/services/fastapi-backend/scripts/seed_data.py that:
+   - Creates a default system admin user (email: admin@ilews.gov, role: system_admin)
+   - Creates two sample slopes with realistic Malaysian coordinates
+   - Creates three sample sensor nodes per slope
+   - Prints confirmation of each created record
+
+Run: alembic upgrade head to verify migrations work cleanly against the
+docker-compose PostgreSQL instance.
+
+
+[CHECKPOINT 1]
+Verify before continuing:
+  [ ] alembic upgrade head runs without errors
+  [ ] All 13 tables exist in the ilews database
+  [ ] TimescaleDB hypertable exists on sensor_readings (check via psql)
+  [ ] seed_data.py runs and creates sample records
+  [ ] python -m pytest tests/ passes (even if no tests yet)
+
+
+================================================================================
+PHASE 2: FASTAPI BACKEND CORE
+================================================================================
+
+--- PROMPT 2.1 ---
+In cloud/services/fastapi-backend/app/, implement authentication:
+
+1. app/utils/security.py:
+   - create_access_token(data: dict) -> str using python-jose with HS256
+     (use RS256 config but HS256 for simplicity in dev; note the difference)
+   - verify_token(token: str) -> dict (raises HTTPException 401 if invalid)
+   - hash_password(password: str) -> str using bcrypt
+   - verify_password(plain: str, hashed: str) -> bool
+
+2. app/routers/auth.py:
+   - POST /auth/token: accepts form data (username, password), validates against
+     users table, returns access_token, token_type, expires_in
+   - POST /auth/refresh: accepts refresh_token in JSON body, returns new tokens
+   - Use OAuth2PasswordRequestForm
+
+3. app/utils/dependencies.py:
+   - get_current_user(token: Annotated[str, Depends(oauth2_scheme)]) -> User
+     decodes JWT, fetches user from DB, raises 401 if invalid
+   - require_role(*roles: str): returns a dependency that checks user role;
+     raises 403 if user's role is not in the allowed roles list
+
+4. app/schemas/auth.py: Pydantic schemas for Token, TokenData, LoginRequest
+
+5. Write pytest tests in tests/test_auth.py covering:
+   - Successful login returns valid token
+   - Invalid password returns 401
+   - Protected endpoint without token returns 401
+   - Protected endpoint with valid token returns 200
+
+
+--- PROMPT 2.2 ---
+In cloud/services/fastapi-backend/app/, implement the Sensor Nodes API:
+
+1. app/schemas/sensor_nodes.py:
+   Pydantic schemas: NodeCreate, NodeUpdate, NodeResponse, NodeLocationUpdate
+   All schemas include field validation (lat between -90 and 90, etc.)
+
+2. app/services/node_service.py:
+   - get_all_nodes(slope_id, status, page, per_page) -> paginated list
+   - get_node_by_id(node_id) -> Node or 404
+   - create_node(data: NodeCreate) -> Node (checks slope exists, node_id unique)
+   - update_node(node_id, data: NodeUpdate) -> Node
+   - delete_node(node_id) -> soft delete (sets is_deleted=True)
+   - update_node_location(node_id, lat, lon, source, reference) -> Node
+   - All write operations log to audit_logs table
+
+3. app/routers/nodes.py:
+   Implement all endpoints from the API Specification document:
+   GET /v1/nodes, GET /v1/nodes/{node_id},
+   POST /v1/nodes (admin only), PUT /v1/nodes/{node_id} (admin only),
+   DELETE /v1/nodes/{node_id} (admin only),
+   PUT /v1/nodes/{node_id}/location (admin only)
+   All responses use the standard success envelope format.
+
+4. Register the nodes router in app/main.py with prefix /v1
+
+5. Write tests in tests/test_nodes.py covering CRUD operations and
+   permission checks for different user roles.
+
+
+--- PROMPT 2.3 ---
+In cloud/services/fastapi-backend/app/, implement the Sensor Readings API:
+
+1. app/schemas/sensor_readings.py:
+   Pydantic schemas for ReadingCreate (used by ETL ingestion), ReadingResponse,
+   ReadingExportParams
+
+2. app/services/reading_service.py:
+   - get_latest_reading(node_id) -> ReadingResponse (from Redis if available,
+     fallback to DB query)
+   - get_readings_history(node_id, start_time, end_time, resample, page, per_page)
+     resample options: raw, 1min, 15min, 1h (use TimescaleDB time_bucket for
+     resampled queries)
+   - get_latest_readings_for_slope(slope_id) -> list of latest per node
+   - ingest_reading(data: ReadingCreate) -> Reading (deduplication check on
+     node_id + timestamp + packet_id; writes to DB and updates Redis cache)
+
+3. app/routers/readings.py:
+   GET /v1/nodes/{node_id}/readings/latest
+   GET /v1/nodes/{node_id}/readings (with pagination)
+   GET /v1/nodes/{node_id}/readings/export (CSV/JSON download)
+   GET /v1/slopes/{slope_id}/readings/latest
+   POST /v1/internal/readings (internal endpoint for ETL service, no user auth,
+   uses a service-to-service API key header instead)
+
+4. Implement Redis caching in reading_service.py:
+   On ingest: SET node:{node_id}:latest as a Redis hash with all reading fields,
+   TTL 15 minutes.
+   On get_latest: try Redis first, fall back to DB on cache miss.
+
+5. Write tests covering: ingest + retrieve, deduplication, cache hit vs miss,
+   resampling query returns expected intervals.
+
+
+--- PROMPT 2.4 ---
+In cloud/services/fastapi-backend/app/, implement the Risk Scores and Alerts APIs:
+
+1. app/schemas/risk_scores.py and app/schemas/alerts.py: full Pydantic schemas
+
+2. app/services/risk_service.py:
+   - get_current_risk(slope_id) -> RiskScore (from Redis key risk:{slope_id}:current)
+   - get_risk_history(slope_id, start_time, end_time, page, per_page)
+   - get_all_slopes_risk_overview() -> list (for map overview endpoint)
+     Returns list of slopes with current risk; reads from Redis; fallback to DB.
+   - update_risk_score(slope_id, score, level, model_version, ...) -> RiskScore
+     Writes to DB and updates Redis. If level changed to RED or ORANGE, publishes
+     an internal event to trigger the notification service.
+
+3. app/services/alert_service.py:
+   - list_alerts(filters...) -> paginated list
+   - get_alert(alert_id) -> Alert or 404
+   - create_alert(slope_id, level, risk_score, source) -> Alert
+     Auto-generates alert_id as ALT-YYYY-NNNNNN format.
+   - acknowledge_alert(alert_id, user, notes) -> Alert (logs to audit_logs)
+   - resolve_alert(alert_id, user, notes) -> Alert
+   - manual_override_alert(slope_id, reason, user) -> Alert
+   - mark_false_alarm(alert_id, reason, user) -> Alert
+
+4. app/routers/risk.py and app/routers/alerts.py:
+   Implement all endpoints from the API Specification including:
+   GET /v1/slopes/{slope_id}/risk
+   GET /v1/slopes/{slope_id}/risk/history
+   GET /v1/slopes/risk/overview
+   GET /v1/alerts (with filters)
+   GET /v1/alerts/{alert_id}
+   POST /v1/alerts/{alert_id}/acknowledge
+   POST /v1/alerts/{alert_id}/resolve
+   POST /v1/alerts/override
+   GET /v1/alerts/{alert_id}/notifications
+
+5. Register both routers in main.py. Write tests for each endpoint.
+
+
+--- PROMPT 2.5 ---
+In cloud/services/fastapi-backend/app/, implement the Map API, User API,
+System Health API, and Reports API:
+
+1. app/routers/map.py:
+   GET /v1/map/data: returns all nodes with lat/lon and current risk level
+   plus risk_zones (polygon around each slope based on zone_polygon field).
+   Reads from Redis snapshot key map:overview:snapshot if fresh (< 90 seconds).
+   Otherwise queries DB + Redis for each slope and rebuilds snapshot.
+
+2. app/routers/slopes.py:
+   GET /v1/slopes, GET /v1/slopes/{slope_id}
+   POST /v1/slopes (admin), PUT /v1/slopes/{slope_id} (admin)
+
+3. app/routers/users.py:
+   GET /v1/users (admin only), POST /v1/users (admin only),
+   PUT /v1/users/{user_id}/role (admin only),
+   DELETE /v1/users/{user_id} (admin only, soft deactivate)
+
+4. app/routers/system.py:
+   GET /v1/system/health: checks connectivity to DB, Redis, returns service
+   statuses as a dict. Also returns node summary counts from DB.
+   GET /v1/nodes/{node_id}/health: returns latest node_health_snapshots record
+   POST /v1/nodes/{node_id}/firmware/update (admin only): creates an OTA job
+   record and publishes MQTT command to edge gateway.
+
+5. app/routers/reports.py:
+   POST /v1/reports/generate: validates request, creates a report record in DB
+   with status "queued", returns report_id.
+   GET /v1/reports/{report_id}: returns report status and download_url if ready.
+   (Actual report generation will be a background task implemented in a later phase.)
+
+6. Register all new routers in main.py. Write at minimum one test per router.
+
+
+--- PROMPT 2.6 ---
+Add a WebSocket endpoint and real-time event broadcasting to the FastAPI backend:
+
+1. Install and configure the "broadcaster" library (or use fastapi-socketio)
+   with Redis as the backend channel.
+
+2. app/routers/websocket.py:
+   GET /v1/ws (WebSocket endpoint):
+   - Validate bearer token passed as query parameter ?token=<jwt>
+   - On connect: add client to a connection manager
+   - Handle incoming client messages: subscribe, unsubscribe (to slope_ids),
+     and ping/pong keepalive
+   - On disconnect: remove from connection manager
+
+3. app/utils/event_broadcaster.py:
+   broadcast_risk_update(slope_id, risk_level, risk_score, timestamp)
+   broadcast_alert_triggered(alert_object)
+   broadcast_node_status_change(node_id, status)
+   broadcast_new_reading(reading_object)
+   Each function publishes to a Redis pub/sub channel that the WebSocket
+   handler subscribes to and forwards to connected clients.
+
+4. Wire the broadcaster into risk_service.py so that when risk level changes,
+   broadcast_risk_update is automatically called.
+
+5. Wire into alert_service.py so new alerts trigger broadcast_alert_triggered.
+
+6. Write an integration test using an async WebSocket test client that:
+   - Connects to /v1/ws with valid token
+   - Subscribes to a slope
+   - Simulates a risk update event
+   - Verifies the client receives the RISK_UPDATE event payload
+
+
+[CHECKPOINT 2]
+Verify before continuing:
+  [ ] All API endpoints return correct responses (test via Swagger UI at /docs)
+  [ ] pytest runs with > 80% pass rate
+  [ ] WebSocket connection works (test with wscat or Postman)
+  [ ] Redis caching is working (verify with redis-cli GET node:A1:latest)
+  [ ] Audit log entries created after node create/update operations
+
+
+================================================================================
+PHASE 3: ETL PROCESSOR SERVICE
+================================================================================
+
+--- PROMPT 3.1 ---
+Create the ETL Processor microservice in cloud/services/etl-processor/:
+
+Set up a Python project with:
+  requirements.txt: paho-mqtt, sqlalchemy, asyncpg, redis, pydantic, loguru
+
+Project structure:
+  etl-processor/
+  ├── app/
+  │   ├── main.py         -- Entry point; starts MQTT subscriber
+  │   ├── config.py       -- Settings (MQTT host, DB URL, Redis URL, etc.)
+  │   ├── mqtt_client.py  -- Paho MQTT subscriber with reconnect logic
+  │   ├── validator.py    -- Incoming packet validation
+  │   ├── enricher.py     -- Adds slope_id, received_at, metadata
+  │   ├── writer.py       -- Writes validated records to DB via HTTP POST
+  │                          to FastAPI internal endpoint
+  │   └── deduplicator.py -- Checks Redis for recently seen packet_ids
+  ├── tests/
+  └── Dockerfile
+
+app/validator.py must check:
+  - All required fields present (node_id, ts, bat, rssi minimum)
+  - No NaN or None in numeric fields
+  - soil_moisture values between 0 and 100
+  - battery_voltage between 7.0 and 15.0
+  - tilt values between -90 and 90
+  - timestamp within 5 minutes of current time (rejects stale replays)
+  - Returns (is_valid: bool, issues: list[str], cleaned_data: dict)
+
+app/deduplicator.py:
+  - On each incoming packet, check Redis key dedup:{node_id}:{timestamp_minute}
+  - If key exists: mark as duplicate, skip
+  - If not: set key with TTL of 10 minutes and process packet
+
+
+--- PROMPT 3.2 ---
+Complete the ETL Processor service:
+
+1. app/mqtt_client.py:
+   - Subscribe to MQTT topic: sensors/+/data (wildcard for all slopes)
+   - On message: extract slope_id from topic, pass to processing pipeline
+   - Implement exponential backoff reconnect logic (1s, 2s, 4s, 8s, max 60s)
+   - Log all reconnect attempts with timestamps
+   - Track and expose metrics: messages_received, messages_valid,
+     messages_invalid, messages_duplicate (for Prometheus scraping)
+
+2. app/enricher.py:
+   - Add received_at (current UTC timestamp)
+   - Generate packet_id as SHA256 hash of node_id + timestamp + raw payload
+   - Map short field names from packet (sm1, rn, tx, etc.) to full DB column names
+   - Look up node record to confirm it exists and is active; reject if not found
+
+3. app/writer.py:
+   - POST to FastAPI internal endpoint POST /v1/internal/readings with service
+     API key header
+   - On HTTP 409 (duplicate): log and continue without error
+   - On HTTP 5xx: add to retry queue (in-memory deque, max 1000 items)
+   - Background task retries failed writes every 30 seconds
+
+4. app/main.py:
+   - Start MQTT client in a background thread
+   - Expose a Prometheus metrics endpoint on port 8001 /metrics
+   - Expose a health check on port 8001 /health
+
+5. Write tests in tests/ covering validation edge cases and enrichment logic.
+   Use a mock MQTT message to test the full pipeline end-to-end.
+
+
+[CHECKPOINT 3]
+Verify before continuing:
+  [ ] ETL service starts and connects to local Mosquitto broker
+  [ ] Publish a test MQTT message; verify it appears in sensor_readings table
+  [ ] Duplicate packet is rejected (only one row in DB for same timestamp)
+  [ ] Invalid packet (missing fields) is rejected with log entry
+  [ ] /metrics endpoint exposes message counters
+
+
+================================================================================
+PHASE 4: NOTIFICATION SERVICE
+================================================================================
+
+--- PROMPT 4.1 ---
+Create the Notification Service in cloud/services/notification-svc/:
+
+Set up Python project structure:
+  notification-svc/
+  ├── app/
+  │   ├── main.py
+  │   ├── config.py
+  │   ├── event_consumer.py  -- Redis pub/sub consumer for alert events
+  │   ├── dispatchers/
+  │   │   ├── sms.py         -- Twilio SMS dispatcher
+  │   │   ├── push.py        -- FCM push notification dispatcher
+  │   │   └── siren.py       -- MQTT back-command to edge gateway siren
+  │   └── retry_handler.py   -- Retry failed notifications
+  ├── tests/
+  └── Dockerfile
+
+app/dispatchers/sms.py:
+  send_sms(to_number: str, alert: AlertPayload) -> bool
+  Message template:
+    "[ILEWS ALERT] Level: {level} | Slope: {slope_name} | Score: {score}
+     Time: {timestamp} | Action: {action_text}
+     Map: https://dashboard.ilews.gov/map?slope={slope_id}"
+  Use Twilio Python SDK. On failure: log error, return False.
+
+app/dispatchers/push.py:
+  send_push(device_tokens: list[str], alert: AlertPayload) -> dict
+  Use FCM HTTP v1 API (not legacy). Send to all registered device tokens
+  for users who have push alerts enabled and have access to the affected slope.
+  Return summary of delivered vs failed.
+
+app/dispatchers/siren.py:
+  activate_siren(gateway_id: str) -> bool
+  Publishes MQTT message to topic: gateways/{gateway_id}/commands
+  Payload: {"command": "ACTIVATE_SIREN", "duration_seconds": 300}
+
+
+--- PROMPT 4.2 ---
+Complete the Notification Service:
+
+1. app/event_consumer.py:
+   Subscribe to Redis pub/sub channel: ilews:alerts:new
+   On event received:
+     - Parse alert payload (slope_id, level, risk_score, timestamp)
+     - Look up registered users for this slope with SMS/push enabled
+       (via HTTP GET to FastAPI backend)
+     - Look up edge gateway ID for the slope
+     - Call all dispatchers in parallel (asyncio.gather)
+     - Write alert_notifications records for each channel via FastAPI API
+     - Log summary of dispatch results
+
+2. app/retry_handler.py:
+   Background task running every 60 seconds:
+   - Query FastAPI for alert_notifications where status="pending" and
+     attempt_count < 3 and last_attempt_at < now() - 30 seconds
+   - Retry each failed notification
+   - Update status to "failed" after 3 attempts
+
+3. app/main.py:
+   Start event consumer and retry handler as asyncio tasks.
+   Health check endpoint on port 8002 /health.
+
+4. Write tests mocking Twilio and FCM API calls, verifying:
+   - RED alert triggers SMS + push + siren
+   - ORANGE alert triggers only dashboard + optional SMS (based on config)
+   - Failed SMS is retried up to 3 times
+   - After 3 failures, status is set to "failed"
+
+
+[CHECKPOINT 4]
+Verify before continuing:
+  [ ] Trigger a manual alert via POST /v1/alerts/override
+  [ ] Verify notification_svc logs show dispatch attempts
+  [ ] alert_notifications table shows records for sms, push, siren channels
+  [ ] Retry handler picks up "pending" records on next cycle
+
+
+================================================================================
+PHASE 5: MACHINE LEARNING PIPELINE
+================================================================================
+
+--- PROMPT 5.1 ---
+In cloud/ml/, set up the ML pipeline infrastructure:
+
+Create this structure:
+  ml/
+  ├── data/
+  │   ├── fetch_training_data.py  -- Pulls data from TimeScaleDB
+  │   └── preprocess.py           -- Feature engineering
+  ├── models/
+  │   ├── lstm_model.py           -- LSTM architecture definition
+  │   └── autoencoder_model.py    -- Anomaly detection fallback
+  ├── training/
+  │   ├── train.py                -- Training script
+  │   └── evaluate.py             -- Evaluation metrics
+  ├── inference/
+  │   └── batch_scorer.py         -- Scores all active slopes periodically
+  ├── utils/
+  │   └── mlflow_utils.py         -- MLflow experiment/run helpers
+  ├── notebooks/
+  │   └── eda_template.ipynb      -- EDA starting template
+  ├── requirements.txt
+  └── config.py
+
+requirements.txt: tensorflow, torch, numpy, pandas, scikit-learn, mlflow,
+  sqlalchemy, psycopg2-binary, matplotlib, seaborn, statsmodels
+
+In data/fetch_training_data.py:
+  - Connect to TimeScaleDB
+  - Fetch sensor_readings for a given slope and date range
+  - Return a pandas DataFrame with all sensor columns
+  - Support optional resampling (default 15-minute intervals using
+    TimescaleDB time_bucket equivalent in pandas)
+
+In data/preprocess.py:
+  Function: build_features(df: DataFrame, window_hours: int = 24) -> DataFrame
+  - Compute rolling mean and std for 1h, 6h, 24h windows for each sensor
+  - Compute cumulative rainfall (antecedent rainfall index, decay factor 0.85)
+  - Compute rate of change for tilt_x_deg and tilt_y_deg
+  - Compute soil moisture gradient (difference between depth layers)
+  - Add hour-of-day and month features (cyclical sin/cos encoding)
+  - Normalise all features to [0, 1] using MinMaxScaler (save scaler to disk)
+  - Return windowed sequences ready for LSTM input (shape: [N, timesteps, features])
+
+
+--- PROMPT 5.2 ---
+Implement the LSTM model and training script in cloud/ml/:
+
+models/lstm_model.py (TensorFlow/Keras):
+  Build function: build_lstm_model(timesteps: int, n_features: int) -> Model
+  Architecture:
+    Input(timesteps, n_features)
+    → LSTM(128, return_sequences=True)
+    → Dropout(0.2)
+    → LSTM(64, return_sequences=False)
+    → Dropout(0.2)
+    → Dense(32, activation="relu")
+    → Dense(1, activation="sigmoid")
+  Compile with: Adam(lr=0.001), binary_crossentropy loss, AUC metric
+
+training/train.py:
+  Main training script that:
+  1. Loads configuration from environment or config.py
+  2. Fetches and preprocesses data for specified slope(s) and date range
+  3. Splits data using temporal split (no random shuffle): 70% train, 15% val,
+     15% test (preserving time order)
+  4. Starts an MLflow run with experiment name "ilews-slope-risk"
+  5. Trains the LSTM model with early stopping (patience=10, monitor=val_auc)
+  6. Logs hyperparameters, metrics (auc, precision, recall, f1, FAR, avg lead time)
+     and the trained model artifact to MLflow
+  7. Saves the model in SavedModel format and also exports a TFLite version
+     for edge deployment
+
+training/evaluate.py:
+  Function: evaluate_model(model, X_test, y_test, timestamps) -> dict
+  Computes: auc_roc, precision, recall, f1, false_alarm_rate,
+  lead_time_avg_minutes (mean time from first RED prediction to labelled event),
+  confusion_matrix. Returns all metrics as a dict.
+
+
+--- PROMPT 5.3 ---
+Implement the ML Inference Service in cloud/services/ml-inference/:
+
+Set up:
+  ml-inference/
+  ├── app/
+  │   ├── main.py           -- FastAPI service
+  │   ├── config.py
+  │   ├── model_loader.py   -- Loads model from MLflow registry or GCS
+  │   ├── feature_builder.py -- Replicates preprocessing for live data
+  │   ├── scorer.py         -- Runs inference for a slope
+  │   └── scheduler.py      -- Background task: score all slopes every 15 min
+  ├── Dockerfile
+  └── requirements.txt
+
+app/model_loader.py:
+  - On startup: download the "production" model from MLflow model registry
+  - Cache model in memory
+  - Expose reload_model() function for hot-reloading without restart
+
+app/scorer.py:
+  score_slope(slope_id: str) -> dict:
+  1. Fetch last 24 hours of readings for all nodes on slope from FastAPI
+  2. Build feature window using feature_builder
+  3. Run model inference
+  4. Apply slope-specific thresholds to map score to risk level
+  5. POST result to FastAPI PUT /v1/internal/risk-scores
+  6. Return {slope_id, risk_score, risk_level, timestamp}
+
+app/scheduler.py:
+  Background async task:
+  - Every 15 minutes: fetch list of active slopes, call score_slope for each
+  - Log inference time per slope
+  - Expose last inference timestamps via /status endpoint
+
+app/main.py:
+  FastAPI app with:
+  - GET /health
+  - GET /status (shows last inference time per slope, model version, model loaded)
+  - POST /score/{slope_id} (trigger immediate re-scoring on demand)
+  - Start scheduler on startup event
+
+
+[CHECKPOINT 5]
+Verify before continuing:
+  [ ] MLflow UI shows a completed training run with logged metrics
+  [ ] TFLite model file exported successfully
+  [ ] ml-inference service starts and loads model from MLflow
+  [ ] POST /score/{slope_id} returns a valid risk score
+  [ ] Scheduler runs and updates risk_scores table every 15 minutes
+
+
+================================================================================
+PHASE 6: EDGE GATEWAY SOFTWARE
+================================================================================
+
+--- PROMPT 6.1 ---
+In edge/gateway_processor/, create the core edge gateway Python service:
+
+Structure:
+  gateway_processor/
+  ├── main.py              -- Entry point with systemd-friendly signal handling
+  ├── config.py            -- Reads from .env file
+  ├── mqtt_local.py        -- Subscribes to local Mosquitto broker
+  ├── validator.py         -- Same validation logic as ETL service (shared spec)
+  ├── buffer.py            -- SQLite read/write operations
+  ├── cloud_sync.py        -- Forwards packets to cloud MQTT broker over TLS
+  ├── connectivity.py      -- Internet connectivity checker
+  ├── schema.sql           -- Edge SQLite schema
+  └── requirements.txt
+
+config.py reads: GATEWAY_ID, SLOPE_ID, LOCAL_MQTT_HOST, LOCAL_MQTT_PORT,
+  CLOUD_MQTT_HOST, CLOUD_MQTT_PORT, CLOUD_MQTT_TLS, CLOUD_MQTT_USERNAME,
+  CLOUD_MQTT_PASSWORD, SQLITE_PATH, SIREN_GPIO_PIN, ALERT_THRESHOLD_RED
+
+buffer.py:
+  - init_db(): creates SQLite tables from schema.sql if not exists
+  - write_reading(packet_json: str, node_id: str): inserts into raw_readings
+  - get_unsynced(limit=50): returns unsynced records ordered by received_at
+  - mark_synced(ids: list[int]): updates is_synced=1 for given IDs
+  - get_pending_count(): returns count of unsynced records
+
+cloud_sync.py:
+  CloudSyncAgent class:
+  - connect(): establishes TLS MQTT connection to cloud broker
+  - sync_batch(): calls buffer.get_unsynced(), publishes each to cloud topic
+    sensors/{slope_id}/data, then calls buffer.mark_synced() on success
+  - run_sync_loop(): runs sync_batch every 30 seconds in a background thread
+  - Handles reconnection with exponential backoff
+
+
+--- PROMPT 6.2 ---
+In edge/local_inference/, create the edge-side ML inference wrapper:
+
+Structure:
+  local_inference/
+  ├── inference_engine.py   -- TFLite model wrapper
+  ├── feature_builder.py    -- Sliding window feature construction from SQLite
+  ├── alert_trigger.py      -- Threshold check + siren/alarm activation
+  └── model/
+      └── .gitkeep          -- (model .tflite file placed here at deployment)
+
+inference_engine.py:
+  class EdgeInferenceEngine:
+  - load_model(path: str): loads TFLite model using tflite-runtime
+  - predict(feature_window: np.ndarray) -> float: runs inference, returns score
+  - is_model_loaded() -> bool
+
+feature_builder.py:
+  build_edge_features(sqlite_conn, slope_id: str, window_minutes: int = 30)
+  -> np.ndarray:
+  - Queries raw_readings from SQLite for last window_minutes
+  - Applies same normalisation and feature construction as cloud pipeline
+    (must use pre-saved scaler parameters stored as a JSON config file)
+  - Returns numpy array shaped for TFLite input
+
+alert_trigger.py:
+  class AlertTrigger:
+  - check_and_trigger(risk_score: float): if score >= RED threshold,
+    calls activate_siren() and logs local alert to SQLite
+  - activate_siren(): toggles GPIO pin (use RPi.GPIO library; mock if not
+    running on Pi hardware by printing a warning instead)
+  - deactivate_siren(): turns off GPIO pin after 5 minutes timeout
+
+Wire everything together in edge/gateway_processor/main.py:
+  Main loop:
+  1. Init SQLite buffer
+  2. Start local MQTT subscriber (receives LoRa packets from ChirpStack)
+  3. Start cloud sync agent
+  4. Every 5 minutes: run edge inference on buffered data, trigger alert if needed
+  5. Handle SIGTERM gracefully (flush buffer before exit)
+
+
+[CHECKPOINT 6]
+Verify before continuing:
+  [ ] Edge gateway service starts without errors (python edge/gateway_processor/main.py)
+  [ ] Simulated MQTT packet written to SQLite buffer correctly
+  [ ] Cloud sync agent forwards packet to docker-compose Mosquitto (local test)
+  [ ] Edge inference returns a risk score (even on dummy data)
+  [ ] Siren activation logs a message (mocked GPIO output)
+
+
+================================================================================
+PHASE 7: DASHBOARD (FRONTEND)
+================================================================================
+
+--- PROMPT 7.1 ---
+Scaffold the React dashboard in dashboard/:
+
+1. Initialise a React TypeScript project using Vite:
+   npm create vite@latest . -- --template react-ts
+   Install: tailwindcss, leaflet, react-leaflet, recharts, react-router-dom,
+   axios, socket.io-client, zustand, react-hot-toast, lucide-react,
+   @tanstack/react-query
+
+2. Set up Tailwind CSS with a dark-mode-first custom theme (primary colour #1e293b
+   slate dark background, accent colour #3b82f6 blue for interactive elements).
+
+3. Create the application layout in src/layouts/MainLayout.tsx:
+   - Top navigation bar with: ILEWS logo, active slope name selector, user name,
+     logout button
+   - Left sidebar (collapsible): Node list with risk-level coloured badges,
+     System Health indicator, Alert Log link
+   - Main content area (fills remaining space)
+   - The sidebar node list shows each node as a card with node_id, last-seen
+     timestamp, and a coloured dot (GREEN/YELLOW/ORANGE/RED)
+
+4. Create src/router.tsx with routes:
+   / → MapView (default)
+   /alerts → AlertsView
+   /nodes → NodesView
+   /reports → ReportsView
+   /admin → AdminView (admin role only)
+   /login → LoginView
+
+5. Create src/store/authStore.ts using zustand:
+   State: user (null or User object), token (string), isAuthenticated (bool)
+   Actions: login(email, password), logout(), refreshToken()
+   Persist token to sessionStorage (not localStorage per project rules).
+
+6. Create src/api/client.ts: axios instance with base URL from env,
+   JWT bearer token injection interceptor, 401 auto-logout handler.
+
+
+--- PROMPT 7.2 ---
+Implement the Map View in dashboard/src/views/MapView.tsx:
+
+This is the primary operational screen. Implement:
+
+1. MapView component using react-leaflet:
+   - Default map centred on Malaysia (3.1, 101.7) zoom level 10
+   - Tile layer: OpenStreetMap
+   - Layer control for toggling: Node Markers, Risk Zones, Topographic overlay
+
+2. Node markers:
+   - Fetch node positions from GET /v1/map/data via react-query (auto-refetch
+     every 60 seconds)
+   - Each node rendered as a CircleMarker with fill colour based on risk_level:
+     GREEN=#22c55e, YELLOW=#eab308, ORANGE=#f97316, RED=#ef4444
+   - RED nodes pulse with a CSS animation
+   - Marker radius scales with risk_score (8px minimum, 18px at score=1.0)
+
+3. Risk zone overlays:
+   - For each slope in risk_zones, render a translucent Polygon
+   - Colour matches risk level with 30% opacity fill
+   - Stroke colour matches risk level at full opacity
+
+4. Node click popup:
+   When clicking a node marker, open a side panel (not a Leaflet popup) on the
+   right side of the screen showing:
+   - Node ID, slope name, last seen timestamp
+   - Current risk score as a gauge/progress bar (0-100%)
+   - Current sensor readings in a clean table (soil moisture at each depth,
+     rainfall, tilt x/y, battery voltage)
+   - 24-hour trend sparkline charts for soil moisture and tilt
+
+5. RED alert modal:
+   When a RISK_UPDATE WebSocket event with level=RED is received:
+   - Show a full-screen overlay modal with red background
+   - Display: "CRITICAL ALERT – {slope_name}" in large text, risk score,
+     timestamp, and an "Acknowledge" button
+   - Play an audible alert tone (use Web Audio API to generate a beep)
+   - Auto-dismiss only after operator clicks Acknowledge
+
+
+--- PROMPT 7.3 ---
+Implement WebSocket real-time updates in the dashboard:
+
+1. src/hooks/useWebSocket.ts:
+   Custom React hook that:
+   - Connects to wss://api.ilews.gov/v1/ws?token={jwt}
+   - Handles reconnection with exponential backoff (2s, 4s, 8s, max 60s)
+   - Subscribes to all slopes on connect
+   - Dispatches incoming events to zustand stores:
+     RISK_UPDATE → updates risk level in mapStore
+     ALERT_TRIGGERED → adds to alertStore, shows toast notification
+     NODE_STATUS_CHANGE → updates node status in nodeStore
+   - Sends ping every 30 seconds for keepalive
+
+2. src/store/mapStore.ts (zustand):
+   State: nodes (map of node_id to NodeData), riskZones (map of slope_id to RiskZone)
+   Actions: updateNodeRisk(node_id, risk_level, risk_score), setNodes(nodes[]),
+   setRiskZones(zones[])
+
+3. src/store/alertStore.ts (zustand):
+   State: activeAlerts (Alert[]), alertHistory (Alert[])
+   Actions: addAlert(alert), acknowledgeAlert(alert_id), clearAlert(alert_id)
+
+4. Connect useWebSocket in the MainLayout so it is always active when user
+   is logged in.
+
+5. Add a real-time alert notification toast (using react-hot-toast) that
+   appears in the top-right corner whenever any ALERT_TRIGGERED event arrives.
+   Toast colour matches alert level. RED toasts persist until dismissed.
+
+
+--- PROMPT 7.4 ---
+Implement remaining dashboard views:
+
+1. src/views/AlertsView.tsx:
+   Table of all alerts with columns: Alert ID, Slope, Level (coloured badge),
+   Risk Score, Triggered At, Status, Acknowledged By, Actions.
+   Filters: level, status, date range, slope selector.
+   Action buttons: Acknowledge, Resolve, View on Map (navigates to MapView
+   and highlights the node).
+   Pagination.
+
+2. src/views/NodesView.tsx:
+   Searchable, filterable table of all nodes.
+   Columns: Node ID, Slope, Status, Last Seen, Battery, Firmware, Coordinates.
+   Admin users see an "Edit" button opening a modal to update node name or
+   manually update coordinates (lat/lon input fields with a note: "Manual
+   coordinate entry — verified against survey reference").
+
+3. src/views/LoginView.tsx:
+   Clean centered login card with ILEWS branding, email + password fields,
+   login button. On success, store token in authStore and redirect to /.
+   Show error message on failed login.
+
+4. src/components/NodeDetailPanel.tsx:
+   Refactor the node detail side panel from MapView into a reusable component.
+   Add a 7-day history chart (line chart using recharts) for soil moisture
+   and tilt. Add a "View in Alerts" button linking to AlertsView filtered
+   by this node's slope.
+
+5. PWA setup:
+   Add vite-plugin-pwa to make the dashboard installable.
+   Configure manifest.json with ILEWS name, theme colour #1e293b, and icons.
+   Offline: show a "Connection lost – last known data" banner when WebSocket
+   disconnects.
+
+
+[CHECKPOINT 7]
+Verify before continuing:
+  [ ] npm run dev starts without errors
+  [ ] Login page works and stores JWT
+  [ ] Map view loads node markers from API
+  [ ] Clicking a node shows the detail side panel
+  [ ] Simulating a WebSocket RISK_UPDATE event changes node colour on map
+  [ ] Alerts view shows alert records from DB
+  [ ] RED alert modal appears and plays beep on simulated RED event
+
+
+================================================================================
+PHASE 8: DOCKERISATION & KUBERNETES
+================================================================================
+
+--- PROMPT 8.1 ---
+Create production-ready Dockerfiles for all services:
+
+1. cloud/services/fastapi-backend/Dockerfile:
+   Multi-stage build: stage 1 installs dependencies, stage 2 copies app.
+   Base: python:3.11-slim. Non-root user "appuser". EXPOSE 8000.
+   CMD: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+
+2. cloud/services/etl-processor/Dockerfile:
+   Base: python:3.11-slim. Non-root user. EXPOSE 8001.
+   CMD: python -m app.main
+
+3. cloud/services/notification-svc/Dockerfile:
+   Base: python:3.11-slim. Non-root user. EXPOSE 8002.
+   CMD: python -m app.main
+
+4. cloud/services/ml-inference/Dockerfile:
+   Base: python:3.11-slim (add tensorflow-cpu to keep image lighter for CPU-only).
+   Non-root user. EXPOSE 8003.
+   CMD: uvicorn app.main:app --host 0.0.0.0 --port 8003
+
+5. dashboard/Dockerfile:
+   Multi-stage: stage 1 (node:20-alpine) builds React app (npm run build).
+   Stage 2 (nginx:alpine) serves build output. EXPOSE 80.
+   Include a nginx.conf that handles React Router (try_files to index.html).
+
+6. Update docker-compose.yml to build and run all five services using the
+   new Dockerfiles. Add depends_on, healthcheck, and restart: unless-stopped
+   to each service.
+
+7. Run docker compose build --no-cache and verify all images build successfully.
+
+
+--- PROMPT 8.2 ---
+Create Kubernetes manifests in cloud/k8s/:
+
+Create a YAML manifest file for each service containing Deployment and Service:
+
+1. fastapi-backend.yaml:
+   Deployment: 2 replicas, image from GCR, envFrom secretRef ilews-secrets,
+   livenessProbe on /health, readinessProbe on /health, resource limits
+   (cpu: 500m, memory: 512Mi), resource requests (cpu: 100m, memory: 128Mi)
+   Service: ClusterIP on port 80 → container 8000
+
+2. etl-processor.yaml: 1 replica minimum, same pattern
+
+3. notification-svc.yaml: 1 replica minimum
+
+4. ml-inference.yaml: 1 replica, larger resource limits
+   (cpu: 1000m, memory: 2Gi for TensorFlow)
+
+5. Create cloud/k8s/hpa/ folder with HorizontalPodAutoscaler YAML files:
+   - hpa-fastapi.yaml: min 2, max 20, target CPU 60%
+   - hpa-etl.yaml: min 2, max 10, target CPU 70%
+   - hpa-ml-inference.yaml: min 1, max 5, target CPU 80%
+
+6. Create cloud/k8s/ingress.yaml:
+   Kubernetes Ingress using GCP Ingress controller:
+   - api.ilews.gov → fastapi-backend:80
+   - dashboard.ilews.gov → (static files served from GCS/CDN separately)
+   Include TLS section referencing a managed certificate
+
+7. Create cloud/k8s/namespace.yaml: creates ilews-production namespace
+
+8. Create a cloud/k8s/deploy-all.sh script that applies all manifests in
+   correct dependency order using kubectl apply.
+
+
+[CHECKPOINT 8]
+Verify before continuing:
+  [ ] docker compose up --build starts all services without errors
+  [ ] All Docker images build successfully
+  [ ] kubectl apply dry-run passes on all K8s YAML files
+  [ ] Kubernetes manifests have correct resource limits and probes
+  [ ] HPA manifests reference correct deployment names
+
+
+================================================================================
+PHASE 9: CI/CD & TERRAFORM
+================================================================================
+
+--- PROMPT 9.1 ---
+Create the GitHub Actions CI/CD pipeline in .github/workflows/:
+
+1. .github/workflows/ci.yml (runs on every push and PR):
+   Jobs:
+   - lint-python: runs flake8 + black --check on all Python services
+   - test-python: runs pytest with coverage for fastapi-backend, etl-processor,
+     notification-svc, ml-inference (each in its own job)
+   - lint-frontend: runs eslint on dashboard/src
+   - test-frontend: runs jest on dashboard
+   - security-scan: runs Trivy scan on all Docker images built in this workflow
+
+2. .github/workflows/build-push.yml (runs on push to main only):
+   - Authenticate to GCP using Workload Identity Federation (no service account keys)
+   - Build and push Docker images to GCP Artifact Registry
+   - Tag images with git SHA and "latest"
+   - Update the Helm chart values file with new image tags
+   - Commit updated values back to repo (triggers ArgoCD sync)
+
+3. .github/workflows/deploy-staging.yml:
+   - Triggered after build-push completes
+   - Uses ArgoCD CLI to sync to ilews-staging namespace
+   - Runs smoke tests: curl health endpoints of all services
+
+4. .github/workflows/deploy-production.yml:
+   - Requires manual approval (GitHub environment protection rule)
+   - Triggered after staging passes
+   - ArgoCD sync to ilews-production
+
+Add required GitHub Actions secrets to the workflow files as references
+(not actual values): GCP_PROJECT_ID, GCP_WORKLOAD_IDENTITY_PROVIDER,
+GCP_SERVICE_ACCOUNT, ARGOCD_SERVER, ARGOCD_TOKEN
+
+
+--- PROMPT 9.2 ---
+Create Terraform infrastructure-as-code in cloud/terraform/:
+
+Structure:
+  terraform/
+  ├── main.tf
+  ├── variables.tf
+  ├── outputs.tf
+  ├── modules/
+  │   ├── gke/
+  │   ├── cloudsql/
+  │   ├── redis/
+  │   └── networking/
+  └── environments/
+      ├── production.tfvars
+      └── staging.tfvars
+
+main.tf should provision:
+  1. GCP VPC with private subnets (networking module)
+  2. GKE cluster (gke module): private nodes, node pools as specified in SDD,
+     Workload Identity enabled, node auto-provisioning disabled
+  3. Cloud SQL instance (cloudsql module): PostgreSQL 16, db-n1-standard-2,
+     high availability enabled (regional), private IP only, ilews database,
+     backup enabled (daily, 30-day retention)
+  4. Memorystore Redis (redis module): STANDARD_HA tier, 1GB, private service access
+  5. GCS buckets: ilews-data-archive (versioning on), ilews-firmware (versioning on),
+     ilews-dashboard-prod (website hosting enabled), ilews-backups
+  6. GCP Secret Manager secrets (empty placeholders; values set manually):
+     ilews-mqtt-password, ilews-db-password, ilews-twilio-auth-token,
+     ilews-twilio-account-sid, ilews-fcm-service-account, ilews-jwt-private-key
+  7. GCP Artifact Registry repository: ilews-services (Docker format)
+  8. Cloud NAT for GKE outbound internet
+
+variables.tf: project_id, region, environment, db_tier, gke_min_nodes, gke_max_nodes
+
+outputs.tf: gke_cluster_name, db_connection_name, redis_host, artifact_registry_url
+
+
+[CHECKPOINT 9]
+Verify before continuing:
+  [ ] GitHub Actions CI workflow passes on a test push
+  [ ] Docker images are built and tagged in CI
+  [ ] terraform validate passes with no errors
+  [ ] terraform plan shows expected resources (review carefully before apply)
+
+
+================================================================================
+PHASE 10: MONITORING, OBSERVABILITY & FINAL INTEGRATION
+================================================================================
+
+--- PROMPT 10.1 ---
+Set up Prometheus metrics and Grafana dashboards:
+
+1. Add Prometheus metrics instrumentation to all Python services using
+   the prometheus-client library:
+
+   fastapi-backend:
+   - http_requests_total (counter, labels: method, endpoint, status_code)
+   - http_request_duration_seconds (histogram, labels: method, endpoint)
+   - active_websocket_connections (gauge)
+   - active_red_alerts_total (gauge)
+
+   etl-processor:
+   - mqtt_messages_received_total (counter, labels: node_id)
+   - mqtt_messages_valid_total (counter)
+   - mqtt_messages_invalid_total (counter, labels: reason)
+   - mqtt_messages_duplicate_total (counter)
+   - end_to_end_ingestion_latency_seconds (histogram)
+
+   ml-inference:
+   - inference_requests_total (counter, labels: slope_id)
+   - inference_latency_seconds (histogram, labels: slope_id)
+   - current_risk_level (gauge, labels: slope_id, level)
+   - model_version_info (gauge, labels: model_version)
+
+   Add /metrics endpoint to each service exposing prometheus metrics.
+
+2. Create Kubernetes ServiceMonitor resources in cloud/k8s/monitoring/ so
+   Prometheus auto-discovers and scrapes all services.
+
+3. Create Grafana dashboard JSON files in cloud/k8s/monitoring/dashboards/:
+   - system-overview.json: alert counts, node status summary, data latency,
+     API health
+   - sensor-network.json: battery levels, packet success rates, RSSI heatmap
+   - ml-performance.json: FAR rolling 30-day, risk score distribution,
+     inference latency
+
+
+--- PROMPT 10.2 ---
+Create an end-to-end integration test suite in a new folder tests/integration/:
+
+1. tests/integration/conftest.py:
+   Setup: start docker-compose test environment, run migrations, seed test data
+   Teardown: stop and clean up docker-compose environment
+   Fixtures: api_client (httpx async), ws_client (websocket test client),
+   mqtt_client (paho test publisher), db_session
+
+2. tests/integration/test_full_pipeline.py:
+   Test: complete_sensor_to_alert_pipeline
+   Steps:
+   1. Publish a simulated sensor packet to local MQTT broker
+   2. Wait up to 30 seconds for packet to appear in sensor_readings table
+   3. Verify ETL validator correctly populated all fields
+   4. Trigger ML inference via POST /score/{slope_id}
+   5. Verify risk_scores table updated
+   6. Set risk score to RED via direct DB update (simulates model threshold breach)
+   7. Verify alert created in alerts table
+   8. Verify alert_notifications records created for SMS and push
+   9. Connect WebSocket client, verify ALERT_TRIGGERED event received
+   10. Acknowledge alert via API, verify status changes to acknowledged
+
+3. tests/integration/test_edge_failover.py:
+   Test: edge_continues_during_internet_outage
+   Steps:
+   1. Publish sensor packets to edge gateway MQTT
+   2. Verify written to SQLite buffer
+   3. Simulate internet loss (disconnect cloud_sync agent)
+   4. Continue publishing packets, verify all buffered in SQLite
+   5. Reconnect cloud_sync agent
+   6. Verify all buffered packets forwarded and appear in cloud DB
+   7. Verify no duplicates (deduplication check)
+
+
+--- PROMPT 10.3 ---
+Create operational scripts and final documentation:
+
+1. scripts/health_check.sh:
+   Bash script that checks all system components are healthy:
+   - Pings FastAPI /health
+   - Pings ETL /health, notification /health, ML inference /health
+   - Checks PostgreSQL connectivity
+   - Checks Redis connectivity
+   - Checks MQTT broker is accepting connections
+   - Reports offline nodes count via API
+   - Exits with code 0 if all healthy, 1 if any critical service is down
+   Suitable for use as a cron job or Kubernetes liveness check.
+
+2. scripts/simulate_landslide_event.py:
+   Test/demo script that simulates a progressive landslide precursor event:
+   - Publishes a series of sensor packets over a configurable time window
+   - Gradually increases soil moisture values, tilt, and vibration
+   - Shows risk score changing from GREEN → YELLOW → ORANGE → RED
+   - Useful for demonstrating system to stakeholders
+   - Accepts --slope-id, --duration-minutes, --speed-multiplier arguments
+
+3. Update the root README.md with:
+   - Project overview (2 paragraphs)
+   - Architecture diagram (ASCII, same as SDD)
+   - Prerequisites list
+   - Quick start guide (make dev-up, run migrations, seed, open dashboard)
+   - Links to each service README
+   - Link to API docs (Swagger UI at /docs)
+   - Environment variables reference (link to .env.example)
+   - Testing instructions
+   - Deployment overview (link to deployment guide)
+
+4. Verify the complete project by running:
+   make dev-up
+   make db-migrate
+   make db-seed
+   python scripts/simulate_landslide_event.py --slope-id SLOPE_BKT_01 \
+     --duration-minutes 5 --speed-multiplier 10
+   And confirm the dashboard shows the risk level progressing to RED.
+
+
+[CHECKPOINT 10 – FINAL]
+Verify the complete system before handoff:
+  [ ] make dev-up starts all services cleanly
+  [ ] simulate_landslide_event.py drives a full GREEN to RED progression
+  [ ] Dashboard shows live map with colour changes during simulation
+  [ ] RED alert modal appears on dashboard when RED threshold crossed
+  [ ] Alert record created in DB with notification records
+  [ ] WebSocket client receives RISK_UPDATE and ALERT_TRIGGERED events
+  [ ] Integration test suite passes (tests/integration/)
+  [ ] health_check.sh exits with code 0
+  [ ] GitHub Actions CI pipeline passes on a test push
+  [ ] terraform validate passes cleanly
+  [ ] All Dockerfiles build and docker compose build succeeds
+  [ ] /docs (Swagger UI) shows all API endpoints with correct schemas
+  [ ] Prometheus /metrics endpoints return valid metrics on all services
+
+
+================================================================================
+APPENDIX: QUICK REFERENCE CHEATSHEET
+================================================================================
+
+Services and Ports (local development):
+  FastAPI Backend   : http://localhost:8000  (API docs: /docs)
+  ETL Processor     : http://localhost:8001  (/health, /metrics)
+  Notification Svc  : http://localhost:8002  (/health)
+  ML Inference      : http://localhost:8003  (/health, /status)
+  Dashboard         : http://localhost:5173  (Vite dev server)
+  PostgreSQL        : localhost:5432
+  Redis             : localhost:6379
+  MQTT Broker       : localhost:1883 (WS: 9001)
+  MLflow UI         : http://localhost:5000
+  Grafana           : http://localhost:3000
+
+Key MQTT Topics:
+  Inbound (sensor → edge → cloud): sensors/{slope_id}/data
+  Outbound (cloud → edge command) : gateways/{gateway_id}/commands
+
+Key Redis Keys:
+  node:{node_id}:latest          -- Latest sensor reading
+  risk:{slope_id}:current        -- Current risk score
+  alerts:active                  -- Sorted set of active alert IDs
+  map:overview:snapshot          -- Cached map data JSON
+  dedup:{node_id}:{ts_minute}    -- Deduplication flag (TTL 10min)
+
+Test User Credentials (after seed_data.py):
+  Admin  : admin@ilews.gov / IlewsAdmin2026!
+  Operator: operator@ilews.gov / IlewsOp2026!
+
+================================================================================
+END OF DOCUMENT – Claude Code Prompts v1.0
+================================================================================
