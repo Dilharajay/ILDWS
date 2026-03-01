@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+
+jobs:
+  lint-python:
+    name: Lint Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install linters
+        run: pip install flake8 black
+      - name: Run flake8
+        run: |
+          flake8 cloud/services/ --max-line-length=100 --exclude=__pycache__,*.pyc,.venv
+          flake8 cloud/ml/ --max-line-length=100 --exclude=__pycache__,*.pyc,.venv
+          flake8 edge/ --max-line-length=100 --exclude=__pycache__,*.pyc,.venv
+      - name: Run black check
+        run: |
+          black --check --line-length=100 cloud/services/
+          black --check --line-length=100 cloud/ml/
+          black --check --line-length=100 edge/
+
+  test-fastapi-backend:
+    name: Test FastAPI Backend
+    runs-on: ubuntu-latest
+    needs: lint-python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        working-directory: cloud/services/fastapi-backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt 2>/dev/null || pip install -e ".[dev]" 2>/dev/null || true
+          pip install pytest pytest-asyncio pytest-cov httpx
+      - name: Run tests
+        working-directory: cloud/services/fastapi-backend
+        run: pytest tests/ -v --cov=app --cov-report=xml
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-backend
+          path: cloud/services/fastapi-backend/coverage.xml
+
+  test-etl-processor:
+    name: Test ETL Processor
+    runs-on: ubuntu-latest
+    needs: lint-python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        working-directory: cloud/services/etl-processor
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+      - name: Run tests
+        working-directory: cloud/services/etl-processor
+        run: pytest tests/ -v --cov=app --cov-report=xml
+
+  test-notification-svc:
+    name: Test Notification Service
+    runs-on: ubuntu-latest
+    needs: lint-python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        working-directory: cloud/services/notification-svc
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+      - name: Run tests
+        working-directory: cloud/services/notification-svc
+        run: pytest tests/ -v --cov=app --cov-report=xml
+
+  test-ml-inference:
+    name: Test ML Inference
+    runs-on: ubuntu-latest
+    needs: lint-python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install dependencies
+        working-directory: cloud/services/ml-inference
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov httpx
+      - name: Run tests
+        working-directory: cloud/services/ml-inference
+        run: pytest tests/ -v --cov=app --cov-report=xml
+
+  lint-frontend:
+    name: Lint Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm ci
+      - name: Run eslint
+        working-directory: dashboard
+        run: npm run lint
+
+  test-frontend:
+    name: Test Frontend
+    runs-on: ubuntu-latest
+    needs: lint-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install dependencies
+        working-directory: dashboard
+        run: npm ci
+      - name: Run tests
+        working-directory: dashboard
+        run: npx vitest run
+      - name: Build
+        working-directory: dashboard
+        run: npm run build
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [test-fastapi-backend, test-etl-processor, test-notification-svc, test-ml-inference, test-frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker images
+        run: |
+          docker build -t ilews/fastapi-backend:ci ./cloud/services/fastapi-backend
+          docker build -t ilews/etl-processor:ci ./cloud/services/etl-processor
+          docker build -t ilews/notification-svc:ci ./cloud/services/notification-svc
+          docker build -t ilews/ml-inference:ci ./cloud/services/ml-inference
+          docker build -t ilews/dashboard:ci ./dashboard
+      - name: Run Trivy scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: image
+          image-ref: ilews/fastapi-backend:ci
+          format: table
+          exit-code: 0
+          severity: CRITICAL,HIGH
