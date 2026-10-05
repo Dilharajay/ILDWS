@@ -1,0 +1,50 @@
+name: Deploy Staging
+
+on:
+  workflow_run:
+    workflows: ["Build & Push"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    environment: staging
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Install ArgoCD CLI
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/
+
+      - name: Sync to staging
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+        run: |
+          argocd app sync ilews-staging --grpc-web --insecure
+          argocd app wait ilews-staging --grpc-web --insecure --timeout 300
+
+      - name: Smoke tests
+        run: |
+          STAGING_URL="${{ vars.STAGING_API_URL }}"
+          for endpoint in /health /v1/system/health; do
+            echo "Checking ${STAGING_URL}${endpoint}..."
+            curl -sf "${STAGING_URL}${endpoint}" || exit 1
+          done
+          echo "All smoke tests passed"

@@ -1,0 +1,67 @@
+name: Build & Push
+
+on:
+  push:
+    branches: [main]
+
+env:
+  GCP_REGION: asia-southeast1
+  REGISTRY: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/ilews-services
+
+jobs:
+  build-push:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push images
+        run: |
+          GIT_SHA=${GITHUB_SHA::8}
+
+          for service in fastapi-backend etl-processor notification-svc ml-inference; do
+            IMAGE="${{ env.REGISTRY }}/${service}"
+            docker build \
+              -t "${IMAGE}:${GIT_SHA}" \
+              -t "${IMAGE}:latest" \
+              ./cloud/services/${service}
+            docker push "${IMAGE}:${GIT_SHA}"
+            docker push "${IMAGE}:latest"
+          done
+
+          # Dashboard
+          IMAGE="${{ env.REGISTRY }}/dashboard"
+          docker build \
+            -t "${IMAGE}:${GIT_SHA}" \
+            -t "${IMAGE}:latest" \
+            ./dashboard
+          docker push "${IMAGE}:${GIT_SHA}"
+          docker push "${IMAGE}:latest"
+
+      - name: Update Helm values with new tags
+        run: |
+          GIT_SHA=${GITHUB_SHA::8}
+          if [ -f cloud/k8s/helm/values.yaml ]; then
+            sed -i "s/tag:.*/tag: ${GIT_SHA}/" cloud/k8s/helm/values.yaml
+            git config user.name "GitHub Actions"
+            git config user.email "actions@github.com"
+            git add cloud/k8s/helm/values.yaml
+            git commit -m "ci: update image tags to ${GIT_SHA}" || true
+            git push
+          fi

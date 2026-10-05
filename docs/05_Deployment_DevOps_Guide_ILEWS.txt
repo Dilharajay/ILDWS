@@ -1,0 +1,946 @@
+================================================================================
+       INTELLIGENT LANDSLIDE EARLY WARNING SYSTEM (ILEWS)
+       DEPLOYMENT & DEVOPS GUIDE
+       Document Version: 1.0 | Status: Draft
+       Date: 2026-02-28
+================================================================================
+
+DOCUMENT CONTROL
+----------------
+Prepared By   : ILEWS Engineering Team
+Classification: Restricted – For Official and Academic Use Only
+Target Audience: System Administrators, DevOps Engineers, Field Technicians
+
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+1.  Introduction
+2.  Infrastructure Overview
+3.  Prerequisites & Tools
+4.  Sensor Node Deployment
+5.  Edge Gateway Deployment
+6.  Cloud Infrastructure Provisioning (GCP)
+7.  Kubernetes Deployment
+8.  Database Initialisation
+9.  CI/CD Pipeline
+10. Monitoring & Observability
+11. Backup & Disaster Recovery
+12. Security Hardening Checklist
+13. Scaling Procedures
+14. Rollback Procedures
+15. Maintenance Procedures
+16. Troubleshooting Guide
+================================================================================
+
+
+1. INTRODUCTION
+---------------
+
+This document provides comprehensive step-by-step instructions for deploying,
+configuring, operating, and maintaining all components of the ILEWS platform.
+It covers three deployment tiers:
+
+  a. Field Deployment: Physical sensor node installation and commissioning.
+  b. Edge Deployment: Gateway hardware setup and software configuration.
+  c. Cloud Deployment: GCP infrastructure provisioning, Kubernetes setup,
+     and CI/CD pipeline configuration.
+
+This document assumes the following roles:
+  - Field Technician: Sections 4 (Sensor Nodes)
+  - Edge DevOps Engineer: Sections 5 (Edge Gateway)
+  - Cloud DevOps Engineer: Sections 6, 7, 8, 9 (Cloud)
+  - System Administrator: All sections
+
+IMPORTANT: All credentials, API keys, and secrets referenced in this
+document are stored exclusively in GCP Secret Manager or HashiCorp Vault.
+They are NEVER hardcoded in configuration files or source code.
+
+
+2. INFRASTRUCTURE OVERVIEW
+---------------------------
+
+                   FIELD                      CLOUD
+           ┌─────────────┐          ┌──────────────────────┐
+           │  Slope Site  │          │   GCP (GKE Cluster)  │
+           │  ┌─────────┐ │   4G/   │  ┌────────────────┐  │
+           │  │ Node A  │ │  Starlink│  │ MQTT Broker    │  │
+           │  │ Node B  │ │──────────│  │ ETL Processor  │  │
+           │  │ Node C  │ │          │  │ ML Inference   │  │
+           │  └────┬────┘ │          │  │ FastAPI        │  │
+           │ LoRaWAN│     │          │  │ Notification   │  │
+           │  ┌────▼────┐ │          │  └────────────────┘  │
+           │  │  Edge   │ │          │  ┌──────────────────┐ │
+           │  │ Gateway │ │          │  │ TimeScaleDB      │ │
+           │  └─────────┘ │          │  │ Redis / GCS      │ │
+           └─────────────┘          └──────────────────────┘
+
+
+3. PREREQUISITES & TOOLS
+--------------------------
+
+3.1 Required Accounts & Access
+    - GCP Project with billing enabled (project ID: ilews-prod)
+    - GCP IAM roles: Owner or predefined roles as documented
+    - Twilio account (SMS) with verified sender number
+    - Firebase project (push notifications)
+    - Domain name with DNS control (for api.ilews.gov)
+    - SSL certificate (managed by GCP Certificate Manager)
+
+3.2 Required CLI Tools (Admin Workstation)
+    Install on the administration workstation before beginning:
+
+    a. Google Cloud SDK (gcloud):
+       $ curl https://sdk.cloud.google.com | bash
+       $ gcloud init
+       $ gcloud auth login
+       $ gcloud config set project ilews-prod
+
+    b. kubectl:
+       $ gcloud components install kubectl
+
+    c. Helm (Kubernetes package manager):
+       $ curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+    d. Docker:
+       $ sudo apt install docker.io
+       $ sudo usermod -aG docker $USER
+
+    e. Terraform (Infrastructure as Code):
+       $ wget https://releases.hashicorp.com/terraform/1.8.0/terraform_1.8.0_linux_amd64.zip
+       $ unzip terraform_1.8.0_linux_amd64.zip && sudo mv terraform /usr/local/bin/
+
+    f. ArgoCD CLI:
+       $ curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+       $ sudo install -m 555 argocd /usr/local/bin/argocd
+
+3.3 Repository Structure
+    /ilews-project
+    ├── firmware/              -- ESP32 sensor node firmware (C++)
+    ├── edge/                  -- Edge gateway Python services
+    │   ├── gateway_processor/ -- Data validator, MQTT client
+    │   ├── local_inference/   -- TFLite model + inference wrapper
+    │   └── config/            -- Edge configuration templates
+    ├── cloud/
+    │   ├── services/          -- Kubernetes microservices (Docker + Python)
+    │   │   ├── mqtt-broker/
+    │   │   ├── etl-processor/
+    │   │   ├── ml-inference/
+    │   │   ├── fastapi-backend/
+    │   │   └── notification-svc/
+    │   ├── ml/                -- ML training scripts + notebooks
+    │   ├── k8s/               -- Kubernetes manifests (YAML)
+    │   ├── terraform/         -- GCP infrastructure definitions
+    │   └── helm/              -- Helm charts
+    ├── dashboard/             -- React frontend
+    ├── docs/                  -- This and other documentation
+    └── .github/workflows/     -- GitHub Actions CI/CD
+
+
+4. SENSOR NODE DEPLOYMENT
+--------------------------
+
+4.1 Pre-Deployment Checklist
+    Before taking nodes to the field, verify in the lab:
+    [ ] All sensors respond correctly on I2C/ADC scan
+    [ ] LoRa module communicates with test gateway (bench test)
+    [ ] Battery fully charged (>12.6V on LiFePO4)
+    [ ] Solar panel charging confirmed in sunlight
+    [ ] Firmware flashed with correct Node ID and Slope ID
+    [ ] Node ID registered in the ILEWS dashboard before deployment
+    [ ] IP68 enclosure sealed, cable glands torqued
+    [ ] Silica gel packets inserted
+
+4.2 Firmware Flashing
+    Equipment required: USB-to-UART adapter, laptop with Arduino IDE or
+    ESP-IDF toolchain installed.
+
+    Step 1: Connect USB adapter to ESP32 UART0 (GPIO1/GPIO3)
+    Step 2: Set node-specific configuration in firmware/config/config.h:
+      #define NODE_ID       "A1"
+      #define SLOPE_ID      "SLOPE_BKT_01"
+      #define LORA_FREQ     915E6          // Match deployment region
+      #define SAMPLE_INTERVAL_MIN  10
+      #define ALERT_THRESHOLD_SM   75.0    // Soil moisture % alert
+      #define ALERT_THRESHOLD_TILT 0.5     // Tilt degrees alert
+    Step 3: Compile and flash:
+      $ pio run --target upload --environment esp32dev
+    Step 4: Open serial monitor, verify startup log shows:
+      [BOOT] Node ID: A1 | Slope: SLOPE_BKT_01
+      [LORA] LoRa init OK | Freq: 915 MHz
+      [SENSOR] All sensors OK
+      [POWER] Battery: 12.6V | Solar: 18.2W
+      [SLEEP] Entering deep sleep for 600s
+
+4.3 Physical Installation
+
+    Soil Moisture Sensors:
+      - Auger three holes at 0.5m, 1.0m, 2.0m depth
+      - Insert capacitive soil moisture probes vertically
+      - Backfill carefully to avoid air pockets around sensor
+
+    Inclinometer & MPU6050:
+      - Mount to a steel stake driven 0.5m into slope
+      - Record compass bearing of X-axis in node registry
+      - Apply silicone sealant around stake entry point
+
+    Rain Gauge:
+      - Mount on horizontal surface clear of tree canopy
+      - Level using spirit level; adjust mounting bracket as needed
+      - Note: Tipping bucket volume = 0.2 mm/tip
+
+    Geophone:
+      - Plant spike directly into undisturbed soil at 0.3m depth
+      - Ensure vertical orientation (± 5 degrees)
+
+    Enclosure:
+      - Mount on galvanised steel pole, 1.5m above ground
+      - Face solar panel 5–15 degrees from south (northern hemisphere)
+        or north (southern hemisphere)
+      - Ensure LoRa antenna (868/915 MHz whip) is vertical
+      - Clear antenna from metal surfaces by minimum 30 cm
+
+4.4 Post-Installation Commissioning
+    Step 1: Power on node (connect battery)
+    Step 2: Within 5 minutes, confirm in ILEWS dashboard that node
+            appears with status "active" and sensor readings are live
+    Step 3: Check signal strength: RSSI should be > -120 dBm
+            (Warning if < -120; Critical if < -130 – consider relay node)
+    Step 4: Log installation details in Node Management:
+            - Manual latitude/longitude (from survey map or GPS handset)
+            - Sensor depths
+            - Installation date
+            - Technician name
+
+4.5 Node Coordinate Entry (Manual)
+    ILEWS does NOT use GPS for node positioning on the map.
+    Coordinates must be entered manually by an administrator.
+    Acceptable coordinate sources (in order of preference):
+    1. Licensed surveyor measurement (JUPEM standard)
+    2. Topographic map reference
+    3. GPS handset reading (field handheld, ± 3m accuracy)
+    4. Satellite imagery reference (Google Earth coordinate pickup)
+
+    To register coordinates:
+    Dashboard → Node Management → Select Node → Edit Location →
+    Enter Latitude, Longitude → Select Coordinate Source →
+    Enter Survey Reference (if applicable) → Save
+
+
+5. EDGE GATEWAY DEPLOYMENT
+---------------------------
+
+5.1 Hardware Setup
+    Components:
+      - Raspberry Pi 4 (4GB) or Nvidia Jetson Nano
+      - RAK2245 LoRaWAN Concentrator HAT
+      - 4G USB modem (Huawei E3372 or Quectel EC25)
+      - 20W solar panel + 20,000 mAh LiFePO4 + MPPT controller
+      - IP66 outdoor enclosure (larger than node enclosure)
+      - SIM card with data plan
+
+    Hardware Assembly:
+      1. Attach LoRa HAT to Raspberry Pi GPIO header
+      2. Insert 4G modem into USB port
+      3. Install Pi into enclosure with standoffs
+      4. Connect solar panel and battery to MPPT controller
+      5. Connect MPPT output to USB-C PD input (65W PD adapter)
+         OR to a DC-DC buck converter set to 5.1V for Pi
+      6. Mount enclosure on pole; orient LoRa gateway antenna vertically
+
+5.2 Operating System Setup
+    Use: Raspberry Pi OS Lite 64-bit (Bookworm)
+
+    Step 1: Flash OS to MicroSD (minimum 32GB Class 10):
+      $ rpi-imager
+
+      In imager advanced settings:
+      - Hostname: ilews-gw-01
+      - SSH: Enable (key-based only)
+      - WiFi: Disable (4G only in production)
+      - Username: ilews
+      - Timezone: Set to deployment region
+
+    Step 2: First boot setup via SSH:
+      $ ssh ilews@ilews-gw-01.local
+      $ sudo apt update && sudo apt upgrade -y
+      $ sudo apt install -y git python3-pip python3-venv sqlite3 \
+                            mosquitto mosquitto-clients
+
+    Step 3: Install Docker:
+      $ curl -fsSL https://get.docker.com | sh
+      $ sudo usermod -aG docker ilews
+
+5.3 ChirpStack LoRaWAN Network Server
+    ChirpStack manages LoRaWAN device registration and decryption.
+
+    Step 1: Install ChirpStack via Docker Compose:
+      $ git clone https://github.com/chirpstack/chirpstack-docker.git
+      $ cd chirpstack-docker
+      # Edit chirpstack.toml for regional frequency plan
+      # Set: enabled_regions=["AU915"] or ["EU868"] as applicable
+      $ docker compose up -d
+
+    Step 2: Access ChirpStack UI at http://localhost:8080
+      Default credentials: admin / admin (CHANGE IMMEDIATELY)
+
+    Step 3: Register the LoRaWAN gateway (RAK2245) with DevEUI from label
+
+    Step 4: Register each sensor node (OTAA activation):
+      - DevEUI: printed on node PCB or LoRa module
+      - AppKey: from firmware config.h (generated per node)
+      - Device Profile: CLASS_A_OTAA
+
+5.4 Gateway Processor Service
+    Step 1: Clone repo and set up virtual environment:
+      $ git clone https://github.com/ilews/ilews-edge.git
+      $ cd ilews-edge
+      $ python3 -m venv venv && source venv/bin/activate
+      $ pip install -r requirements.txt
+
+    Step 2: Configure environment variables:
+      $ cp .env.template .env
+      $ nano .env
+
+      GATEWAY_ID=GW_BKT_01
+      SLOPE_ID=SLOPE_BKT_01
+      LOCAL_MQTT_HOST=localhost
+      LOCAL_MQTT_PORT=1883
+      CLOUD_MQTT_HOST=mqtt.ilews.gov
+      CLOUD_MQTT_PORT=8883
+      CLOUD_MQTT_TLS=true
+      CLOUD_MQTT_USERNAME=<from_GCP_secret_manager>
+      CLOUD_MQTT_PASSWORD=<from_GCP_secret_manager>
+      SQLITE_PATH=/var/ilews/gateway/ilews_buffer.db
+      EDGE_MODEL_PATH=/opt/ilews/models/edge_model.tflite
+      SIREN_GPIO_PIN=17
+      ALERT_THRESHOLD_RED=0.85
+
+    Step 3: Create database:
+      $ sqlite3 /var/ilews/gateway/ilews_buffer.db < schema/edge_schema.sql
+
+    Step 4: Run as systemd service:
+      $ sudo cp config/ilews-gateway.service /etc/systemd/system/
+      $ sudo systemctl enable ilews-gateway
+      $ sudo systemctl start ilews-gateway
+
+    Monitor logs:
+      $ sudo journalctl -u ilews-gateway -f
+
+5.5 Local Inference Setup
+    Step 1: Download TFLite model from cloud (requires auth):
+      $ python3 scripts/download_edge_model.py \
+          --version latest \
+          --output /opt/ilews/models/edge_model.tflite
+
+    Step 2: Test local inference:
+      $ python3 -c "from local_inference import run_inference; print(run_inference())"
+      Expected output: risk_score=0.12, risk_level=GREEN
+
+5.6 Siren/Alarm Wiring
+    GPIO pin 17 (BCM numbering) → Relay module IN
+    Relay NO (Normally Open) → Siren power circuit
+    Relay COM → 12V supply positive
+    Relay NC (Normally Closed) → Not connected
+
+    Test siren activation:
+      $ python3 scripts/test_siren.py
+      (Activates siren for 3 seconds, then deactivates)
+
+5.7 Network Redundancy (4G + Starlink failover)
+    Configure network priority using systemd-networkd:
+      - 4G modem interface (usb0): metric 100 (primary)
+      - Starlink (eth0 or usb1): metric 200 (backup)
+    Connectivity watchdog pings 8.8.8.8 every 30 seconds;
+    failover to backup interface if primary unreachable for 2 minutes.
+
+
+6. CLOUD INFRASTRUCTURE PROVISIONING (GCP)
+--------------------------------------------
+
+6.1 Terraform Provisioning
+    All GCP infrastructure is defined as code using Terraform.
+    This ensures reproducible, auditable, and version-controlled deployments.
+
+    Step 1: Authenticate:
+      $ gcloud auth application-default login
+
+    Step 2: Initialise Terraform:
+      $ cd cloud/terraform
+      $ terraform init
+
+    Step 3: Review planned changes:
+      $ terraform plan -var-file=environments/production.tfvars
+
+    Step 4: Apply (creates all GCP resources):
+      $ terraform apply -var-file=environments/production.tfvars
+
+    Resources provisioned by Terraform:
+    - GKE Cluster (ilews-cluster) with node pools
+    - Cloud SQL instance (PostgreSQL 16, HA configuration)
+    - Redis instance (Memorystore)
+    - Pub/Sub topics and subscriptions
+    - GCS buckets (parquet archive, model storage)
+    - Secret Manager secrets (MQTT credentials, Twilio keys, etc.)
+    - VPC with private subnets
+    - Cloud NAT (for outbound GKE traffic)
+    - GCP Certificate Manager (TLS for api.ilews.gov)
+    - Load Balancer (HTTPS)
+    - IAM service accounts and bindings
+
+6.2 GKE Cluster Configuration
+    Cluster: ilews-cluster
+    Region: asia-southeast1 (Singapore) or nearest GCP region
+    Release channel: Regular (auto-patching)
+    Node pools:
+      Pool 1 (general): n2-standard-2, min 2, max 10 (autoscaling)
+      Pool 2 (ml-inference): n2-standard-4, min 1, max 3 (autoscaling)
+        (Larger instances for ML model serving)
+
+    Connect to cluster:
+      $ gcloud container clusters get-credentials ilews-cluster \
+          --region asia-southeast1
+
+    Verify:
+      $ kubectl get nodes
+      Expected: 2–4 nodes in Ready state
+
+6.3 GCP Secret Manager Setup
+    Store all secrets BEFORE deploying Kubernetes workloads:
+
+    $ gcloud secrets create ilews-mqtt-password \
+        --replication-policy="automatic"
+    $ echo -n "your-secure-password" | \
+        gcloud secrets versions add ilews-mqtt-password --data-file=-
+
+    Required secrets:
+    - ilews-mqtt-password       : Cloud MQTT broker password
+    - ilews-db-password         : PostgreSQL password
+    - ilews-twilio-auth-token   : Twilio authentication token
+    - ilews-twilio-account-sid  : Twilio account SID
+    - ilews-fcm-service-account : Firebase service account JSON
+    - ilews-jwt-private-key     : RS256 private key for JWT signing
+    - ilews-mlflow-s3-key       : GCS access key for MLflow
+
+6.4 TimeScaleDB Extension Setup
+    After PostgreSQL instance is created:
+    $ gcloud sql connect ilews-db --user=ilews_admin --database=ilews
+    -- Install extension:
+    CREATE EXTENSION IF NOT EXISTS timescaledb;
+    -- Run schema migrations:
+    \i /migrations/001_initial_schema.sql
+    \i /migrations/002_hypertables.sql
+    \i /migrations/003_indexes.sql
+    \i /migrations/004_retention_policies.sql
+
+
+7. KUBERNETES DEPLOYMENT
+--------------------------
+
+7.1 Namespace Setup
+    $ kubectl create namespace ilews-production
+    $ kubectl create namespace ilews-monitoring
+    $ kubectl config set-context --current --namespace=ilews-production
+
+7.2 Deploy All Services with Helm
+
+    All services are packaged as Helm charts in cloud/helm/.
+    The umbrella chart deploys all services in correct dependency order.
+
+    Step 1: Add required Helm repositories:
+      $ helm repo add bitnami https://charts.bitnami.com/bitnami
+      $ helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      $ helm repo update
+
+    Step 2: Create Kubernetes secrets from GCP Secret Manager:
+      $ kubectl create secret generic ilews-secrets \
+          --from-literal=db-password=$(gcloud secrets versions access latest \
+              --secret=ilews-db-password) \
+          --from-literal=twilio-token=$(gcloud secrets versions access latest \
+              --secret=ilews-twilio-auth-token) \
+          ...
+
+    Step 3: Deploy ILEWS umbrella chart:
+      $ helm install ilews-production ./cloud/helm/ilews \
+          --namespace ilews-production \
+          --values cloud/helm/ilews/values-production.yaml
+
+    Step 4: Verify all pods are running:
+      $ kubectl get pods -n ilews-production
+      Expected output (all STATUS = Running):
+        mqtt-broker-xxx            1/1 Running
+        etl-processor-xxx          1/1 Running
+        ml-inference-xxx           1/1 Running
+        fastapi-backend-xxx        1/1 Running
+        notification-svc-xxx       1/1 Running
+        mlflow-server-xxx          1/1 Running
+
+7.3 Service Exposure
+
+    FastAPI Backend:
+      Exposed via GCP Load Balancer at: https://api.ilews.gov
+      Internal: ClusterIP service at port 8000
+
+    MQTT Broker:
+      Exposed via LoadBalancer at: mqtt.ilews.gov:8883 (TLS)
+      Edge gateways connect to this address.
+
+    Dashboard (React):
+      Deployed as static files to GCS bucket, served via CDN
+      URL: https://dashboard.ilews.gov
+
+    MLflow:
+      Internal only (ClusterIP). Accessed via kubectl port-forward
+      for model management.
+
+7.4 Horizontal Pod Autoscaler (HPA)
+    $ kubectl apply -f k8s/hpa-fastapi.yaml
+    $ kubectl apply -f k8s/hpa-etl.yaml
+    $ kubectl apply -f k8s/hpa-ml-inference.yaml
+
+    HPA configuration (fastapi-backend):
+      minReplicas: 2
+      maxReplicas: 20
+      targetCPUUtilizationPercentage: 60
+      targetMemoryUtilizationPercentage: 70
+
+7.5 Deploy Dashboard (Frontend)
+    $ cd dashboard
+    $ npm install && npm run build
+    $ gsutil -m cp -r build/* gs://ilews-dashboard-prod/
+    $ gcloud compute url-maps invalidate-cdn-cache \
+        ilews-dashboard-lb --path "/*"
+
+    Dashboard URL: https://dashboard.ilews.gov
+
+
+8. DATABASE INITIALISATION
+---------------------------
+
+8.1 Run Migrations
+    Migrations are managed by Alembic (Python SQLAlchemy).
+
+    $ cd cloud/services/fastapi-backend
+    $ source venv/bin/activate
+    $ export DATABASE_URL="postgresql://ilews_admin:<password>@<db-ip>:5432/ilews"
+    $ alembic upgrade head
+
+    This runs all migration scripts in cloud/services/fastapi-backend/migrations/
+    creating all tables, hypertables, indexes, and retention policies.
+
+8.2 Seed Initial Data
+    $ python3 scripts/seed_data.py
+    Creates:
+    - Default system administrator account
+    - GCP health check probe user (read-only)
+    - Default alert threshold configurations
+
+8.3 Verify Database
+    $ psql $DATABASE_URL -c "\dt"
+    Expected: 13 tables listed (slopes, sensor_nodes, sensor_readings, ...)
+    $ psql $DATABASE_URL -c "SELECT show_chunks('sensor_readings');"
+    Expected: Empty (no data yet, hypertable ready)
+
+
+9. CI/CD PIPELINE
+------------------
+
+9.1 Pipeline Overview
+    Tool: GitHub Actions (CI) + ArgoCD (CD – GitOps)
+
+    Trigger: Push to main branch or pull request merge
+
+    Pipeline Stages:
+    1. Lint & Format Check (flake8, black, eslint)
+    2. Unit Tests (pytest for Python; jest for React)
+    3. Integration Tests (against staging database)
+    4. Security Scan (Trivy for Docker image vulnerabilities)
+    5. Docker Build & Push (to GCP Artifact Registry)
+    6. ArgoCD Sync (GitOps deploy to staging → production)
+
+9.2 GitHub Actions Workflow (Summary)
+    File: .github/workflows/main.yml
+
+    on:
+      push:
+        branches: [main]
+      pull_request:
+        branches: [main]
+
+    jobs:
+      test:
+        runs-on: ubuntu-latest
+        steps:
+          - checkout
+          - setup Python 3.11
+          - pip install -r requirements.txt
+          - pytest --cov=. --cov-report=xml
+          - flake8 . --max-line-length=100
+
+      build-push:
+        needs: test
+        runs-on: ubuntu-latest
+        steps:
+          - docker build -t gcr.io/ilews-prod/fastapi-backend:${{ github.sha }} .
+          - docker push gcr.io/ilews-prod/fastapi-backend:${{ github.sha }}
+
+      deploy-staging:
+        needs: build-push
+        steps:
+          - Update Helm chart values with new image tag
+          - ArgoCD sync to staging namespace
+
+      deploy-production:
+        needs: deploy-staging
+        if: github.ref == 'refs/heads/main'
+        environment: production     # Requires manual approval in GitHub
+        steps:
+          - ArgoCD sync to production namespace
+
+9.3 ArgoCD Setup
+    $ kubectl create namespace argocd
+    $ kubectl apply -n argocd -f \
+        https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+    $ argocd login --insecure --grpc-web <argocd-server-ip>
+
+    Create application:
+    $ argocd app create ilews-production \
+        --repo https://github.com/ilews/ilews-project.git \
+        --path cloud/helm/ilews \
+        --dest-server https://kubernetes.default.svc \
+        --dest-namespace ilews-production \
+        --sync-policy automated \
+        --auto-prune \
+        --self-heal
+
+9.4 Firmware OTA Update Pipeline
+    ESP32 firmware OTA is managed separately:
+    1. New firmware compiled and tested
+    2. Binary uploaded to GCS: gs://ilews-firmware/v1.4.0/firmware.bin
+    3. OTA command sent via API: POST /v1/nodes/{node_id}/firmware/update
+    4. Edge gateway fetches binary from GCS and pushes to node via
+       ESP32's built-in OTA partition
+
+
+10. MONITORING & OBSERVABILITY
+--------------------------------
+
+10.1 Prometheus + Grafana Stack
+    Deploy to monitoring namespace:
+    $ helm install monitoring prometheus-community/kube-prometheus-stack \
+        --namespace ilews-monitoring \
+        --values cloud/helm/monitoring-values.yaml
+
+    Access Grafana:
+    $ kubectl port-forward svc/monitoring-grafana 3000:80 -n ilews-monitoring
+    URL: http://localhost:3000
+    Default: admin / <set in helm values>
+
+10.2 Key Dashboards to Configure
+    Dashboard 1: System Overview
+      - Total active nodes / offline nodes
+      - End-to-end data latency (sensor to dashboard)
+      - Alert count per day by level
+      - ML inference throughput (inferences/min)
+
+    Dashboard 2: Sensor Network Health
+      - Battery voltage per node (heatmap)
+      - Packet success rate per node (%)
+      - RSSI distribution
+      - Last-seen timestamps
+
+    Dashboard 3: ML Model Performance
+      - Rolling 30-day FAR (%)
+      - Alert distribution by level
+      - Risk score distribution
+      - Model inference latency
+
+    Dashboard 4: API & Infrastructure
+      - API request rate and error rate
+      - Database query latency (p50, p95, p99)
+      - Kubernetes pod health
+      - GKE node CPU and memory utilisation
+
+10.3 Alerting Rules (Prometheus Alertmanager)
+    Configured in cloud/k8s/alertmanager-rules.yaml:
+
+    Alert: NodeOffline
+      Condition: No sensor reading received for > 15 minutes
+      Severity: warning
+      Action: SMS to System Admin
+
+    Alert: AllNodesOnSlopeOffline
+      Condition: Zero active nodes on a slope for > 10 minutes
+      Severity: critical
+      Action: SMS + email to System Admin + Operations Lead
+
+    Alert: MLInferenceDown
+      Condition: ml-inference service not responding for > 2 minutes
+      Severity: critical
+      Action: SMS to on-call engineer; Kubernetes auto-restart
+
+    Alert: DatabaseConnectionPoolExhausted
+      Condition: DB connection pool > 90% utilised for > 5 minutes
+      Severity: warning
+      Action: Slack notification to #ilews-alerts channel
+
+    Alert: HighFalseAlarmRate
+      Condition: FAR > 5% over rolling 7-day window
+      Severity: warning
+      Action: Email to Data Science team for model review
+
+    Alert: EndToEndLatencyHigh
+      Condition: sensor-to-dashboard latency p95 > 5 minutes
+      Severity: warning
+      Action: Slack to #ilews-ops
+
+
+11. BACKUP & DISASTER RECOVERY
+--------------------------------
+
+11.1 Database Backup Strategy
+    Cloud SQL Automated Backups:
+    - Daily full backup (retained for 30 days)
+    - Binary log retention: 7 days (point-in-time recovery)
+    - Backup location: GCS (multi-region, asia)
+
+    Manual backup before major operations:
+    $ gcloud sql export sql ilews-db gs://ilews-backups/manual/$(date +%Y%m%d).sql \
+        --database=ilews
+
+    Restore from backup:
+    $ gcloud sql import sql ilews-db gs://ilews-backups/manual/20260228.sql \
+        --database=ilews
+
+11.2 GCS Archive Backup
+    All Parquet archives in gs://ilews-data-archive/ have:
+    - Versioning enabled (previous versions retained 365 days)
+    - Dual-region storage class (ASIA1: Singapore + Tokyo)
+
+11.3 Edge Gateway Backup
+    Edge SQLite database backed up daily to GCS:
+    Cron job on gateway:
+      0 2 * * * sqlite3 /var/ilews/gateway/ilews_buffer.db \
+                  ".backup /tmp/backup.db" && \
+                gsutil cp /tmp/backup.db \
+                  gs://ilews-edge-backups/$(hostname)/$(date +\%Y\%m\%d).db
+
+11.4 Disaster Recovery Objectives
+    +-------------------+------------------+------------------+
+    | Component         | RTO (Recovery    | RPO (Data Loss   |
+    |                   |  Time Objective) |  Tolerance)      |
+    +-------------------+------------------+------------------+
+    | Cloud database    | < 4 hours        | < 5 minutes      |
+    | ML Inference Svc  | < 15 minutes     | N/A (stateless)  |
+    | API Backend       | < 15 minutes     | N/A (stateless)  |
+    | Edge Gateway      | < 1 hour (swap)  | < 90 days buffer |
+    | Sensor Node       | < 24 hours       | 0 (buffered edge)|
+    +-------------------+------------------+------------------+
+
+11.5 DR Runbook: Cloud Zone Failure
+    Step 1: GKE multi-zone deployment auto-migrates pods to healthy zone.
+    Step 2: If full region failure:
+            - Trigger GCP region failover via Terraform (secondary region)
+            - Update DNS A record to new Load Balancer IP
+            - Estimated RTO: 2–4 hours
+    Step 3: Notify all stakeholders of service disruption via SMS.
+
+
+12. SECURITY HARDENING CHECKLIST
+----------------------------------
+
+Cloud:
+  [ ] All GCP service accounts use Workload Identity (no key files)
+  [ ] GKE cluster has private nodes (no public IPs on worker nodes)
+  [ ] GKE network policy enforced (pods cannot communicate freely)
+  [ ] Cloud SQL accessible only via Private IP within VPC
+  [ ] GCS buckets have uniform access control (no ACLs)
+  [ ] All secrets in Secret Manager; no secrets in ConfigMaps
+  [ ] Container images scanned by Trivy in CI pipeline
+  [ ] Image pull policy: Always (no stale images in prod)
+  [ ] Kubernetes RBAC: minimal service account permissions
+  [ ] WAF rules enabled on Load Balancer
+  [ ] TLS 1.3 enforced on all HTTPS endpoints; TLS 1.0/1.1 disabled
+
+Edge Gateway:
+  [ ] Password authentication disabled on SSH (keys only)
+  [ ] UFW firewall: only MQTT outbound (8883) and SSH (22) allowed
+  [ ] MQTT credentials rotated after initial deployment
+  [ ] Physical enclosure locked; tamper-evident seal applied
+  [ ] LoRaWAN AppKey stored securely (not in plaintext on device)
+
+Sensor Nodes:
+  [ ] Each node has unique DevEUI and AppKey (no shared keys)
+  [ ] Physical node enclosure IP68 sealed; tamper-evident
+  [ ] Firmware signed before OTA deployment
+
+User Access:
+  [ ] Default admin password changed on all systems immediately
+  [ ] MFA required for all System Administrator accounts
+  [ ] All user accounts reviewed and audited quarterly
+  [ ] Inactive accounts (>90 days) automatically deactivated
+
+
+13. SCALING PROCEDURES
+------------------------
+
+13.1 Adding a New Sensor Node
+    Time estimate: 30 minutes (software side; excludes physical installation)
+    1. Technician installs node in field (Section 4)
+    2. Admin logs into dashboard → Node Management → Add Node
+    3. Enter: node_id, slope_id, name, manual coordinates, sensor depths
+    4. Dashboard confirms node online within 10 minutes
+
+13.2 Adding a New Slope Monitoring Site
+    Time estimate: 4 hours (full setup)
+    1. Create slope record in dashboard (Slope Management → Add Slope)
+    2. Deploy edge gateway on-site (Section 5) – 2 hours
+    3. Register gateway in ChirpStack with new slope's region config
+    4. Deploy and commission sensor nodes (Section 4) – 2+ hours
+    5. Verify all nodes appear on map with green status
+
+13.3 Horizontal Cloud Scaling
+    The GKE cluster auto-scales based on load. Manual scaling:
+    $ kubectl scale deployment fastapi-backend --replicas=10
+
+    To scale GKE node pool:
+    $ gcloud container clusters resize ilews-cluster \
+        --node-pool general \
+        --num-nodes 6 \
+        --region asia-southeast1
+
+
+14. ROLLBACK PROCEDURES
+------------------------
+
+14.1 Kubernetes Service Rollback
+    Kubernetes keeps previous ReplicaSet. Rollback:
+    $ kubectl rollout undo deployment/fastapi-backend
+    $ kubectl rollout status deployment/fastapi-backend
+
+    Rollback to specific revision:
+    $ kubectl rollout history deployment/fastapi-backend
+    $ kubectl rollout undo deployment/fastapi-backend --to-revision=3
+
+14.2 ML Model Rollback
+    $ python3 scripts/promote_model.py --version lstm_v3.0.8 --target production
+    This updates the model version pointer in the model_registry table
+    and restarts the ml-inference pod with the previous model.
+
+    Rollback to previous model via API:
+    POST /v1/admin/models/rollback
+    Body: { "target_version": "lstm_v3.0.8" }
+
+    Time to complete: < 10 minutes
+
+14.3 Database Rollback
+    If a migration causes issues:
+    $ alembic downgrade -1       -- Roll back one migration
+    $ alembic downgrade <rev_id> -- Roll back to specific revision
+
+    CAUTION: Downgrading may cause data loss if migration added new columns.
+    Always take a backup before running alembic upgrade in production.
+
+14.4 Firmware Rollback
+    Send OTA update command with previous firmware version:
+    POST /v1/nodes/{node_id}/firmware/update
+    Body: { "firmware_version": "1.3.2" }
+
+
+15. MAINTENANCE PROCEDURES
+---------------------------
+
+15.1 Routine Cloud Maintenance (Monthly)
+    [ ] Review Grafana dashboards for anomalies
+    [ ] Check and rotate secrets approaching 90-day age
+    [ ] Review and apply pending GKE cluster patch updates
+    [ ] Verify GCS archive jobs completed successfully
+    [ ] Review user access list; deactivate stale accounts
+    [ ] Check Trivy vulnerability scan results; apply fixes
+    [ ] Review False Alarm Rate; escalate to ML team if > 3%
+
+15.2 Node Field Maintenance (Every 6 Months)
+    [ ] Replace silica gel desiccant packets in enclosure
+    [ ] Clean solar panel surface (dust, bird droppings)
+    [ ] Inspect cable glands and seals; re-apply silicone if needed
+    [ ] Verify soil moisture sensor calibration (compare with gravimetric)
+    [ ] Inspect rain gauge funnel for debris; clean mechanism
+    [ ] Check all cable connections inside enclosure
+    [ ] Record battery voltage and solar panel output at noon
+    [ ] Verify firmware is on latest version
+    [ ] Log maintenance visit in dashboard (Node Management → Maintenance Log)
+
+15.3 Edge Gateway Maintenance (Every 6 Months)
+    [ ] Apply OS updates: sudo apt update && sudo apt upgrade -y
+    [ ] Check SQLite buffer for unsynced records > 7 days old
+    [ ] Verify ChirpStack device registry is up to date
+    [ ] Test siren activation (brief 3-second test)
+    [ ] Check 4G signal quality; report to provider if < -90 dBm RSRP
+    [ ] Replace LiFePO4 battery if capacity < 70% of rated capacity
+    [ ] Verify Starlink backup connectivity (if installed)
+
+
+16. TROUBLESHOOTING GUIDE
+--------------------------
+
+ISSUE: Node appears "offline" in dashboard
+  Checks:
+  1. Verify power: Is LED indicator on the node active?
+  2. Check battery voltage (should be > 11.5V for LiFePO4)
+  3. Check RSSI on edge gateway LoRa console – is gateway receiving anything?
+  4. Verify node is registered in ChirpStack with correct DevEUI/AppKey
+  5. Check edge gateway logs: journalctl -u ilews-gateway -n 100
+  6. If RSSI < -125 dBm: Deploy a relay node between this node and gateway
+
+ISSUE: Sensor readings are NaN or out-of-range
+  Checks:
+  1. Check sensor connections inside enclosure (I2C, ADC pins)
+  2. Check for condensation on PCB (check silica gel status)
+  3. Run field diagnostic: connect laptop, open serial monitor, check raw output
+  4. Replace suspect sensor; recalibrate after replacement
+
+ISSUE: Edge gateway not syncing to cloud
+  Checks:
+  1. Test 4G connectivity: ping -c 4 8.8.8.8 from gateway
+  2. Test MQTT connectivity: mosquitto_pub -h mqtt.ilews.gov -p 8883 \
+       --tls-use-os-certs -t test -m hello -u <user> -P <pass>
+  3. Check cloud MQTT broker status via Grafana
+  4. Check local SQLite buffer size: if > 100,000 records, connectivity
+     has been down for extended period
+  5. If 4G fails: verify SIM data plan not expired; try Starlink backup
+
+ISSUE: ML inference giving constant RED alerts (suspected false alarms)
+  Checks:
+  1. Check FAR metric in Grafana ML Performance dashboard
+  2. Check sensor readings for stuck values (sensor fault, not real)
+  3. Check if a new monsoon event is in progress (may be real)
+  4. If confirmed false alarms: trigger model rollback (Section 14.2)
+  5. Escalate to ML team with exported sensor data for analysis
+
+ISSUE: Dashboard not updating in real-time
+  Checks:
+  1. Check WebSocket connection in browser (F12 → Network → WS)
+  2. Check fastapi-backend pod logs: kubectl logs -l app=fastapi-backend
+  3. Check Redis cache is up: kubectl exec redis-pod -- redis-cli ping
+  4. Hard-refresh browser (Ctrl+Shift+R)
+  5. Restart fastapi-backend pods if WebSocket issues persist:
+     kubectl rollout restart deployment/fastapi-backend
+
+ISSUE: SMS alerts not being received
+  Checks:
+  1. Check alert_notifications table for status and error_message
+  2. Check Twilio dashboard for delivery failures and error codes
+  3. Common issues: invalid phone number format, SIM recipient blocked
+  4. Verify Twilio account balance and sender number active status
+
+ISSUE: OTA firmware update stuck
+  Checks:
+  1. Check node connectivity – OTA requires node to be online
+  2. Verify firmware binary in GCS is accessible
+  3. Check edge gateway OTA logs for transfer progress
+  4. If stuck > 30 minutes: cancel OTA, physical access may be required
+
+================================================================================
+END OF DOCUMENT – Deployment & DevOps Guide v1.0
+================================================================================

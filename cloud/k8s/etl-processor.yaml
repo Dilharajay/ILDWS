@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etl-processor
+  namespace: ilews-production
+  labels:
+    app: etl-processor
+    app.kubernetes.io/part-of: ilews
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: etl-processor
+  template:
+    metadata:
+      labels:
+        app: etl-processor
+    spec:
+      containers:
+        - name: etl-processor
+          image: gcr.io/ILEWS_PROJECT/etl-processor:latest
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - secretRef:
+                name: ilews-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etl-processor
+  namespace: ilews-production
+  labels:
+    app: etl-processor
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8001
+      protocol: TCP
+  selector:
+    app: etl-processor

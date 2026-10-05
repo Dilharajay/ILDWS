@@ -1,0 +1,726 @@
+================================================================================
+       INTELLIGENT LANDSLIDE EARLY WARNING SYSTEM (ILEWS)
+       DATABASE SCHEMA DESIGN
+       Document Version: 1.0 | Status: Draft
+       Date: 2026-02-28
+================================================================================
+
+DOCUMENT CONTROL
+----------------
+Prepared By   : ILEWS Engineering Team
+Classification: Restricted – For Official and Academic Use Only
+DBMS          : PostgreSQL 16 + TimeScaleDB 2.14 Extension
+ORM           : SQLAlchemy 2.0 (Python)
+Cache Layer   : Redis 7.2
+Archive Format: Apache Parquet on Google Cloud Storage (GCS)
+
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+1.  Database Architecture Overview
+2.  Naming Conventions
+3.  Core Schema: slopes
+4.  Core Schema: sensor_nodes
+5.  Core Schema: sensor_readings (TimeScaleDB Hypertable)
+6.  Core Schema: risk_scores
+7.  Core Schema: alerts
+8.  Core Schema: alert_notifications
+9.  Core Schema: users
+10. Core Schema: audit_logs
+11. Core Schema: node_health_snapshots
+12. Core Schema: model_registry
+13. Core Schema: reports
+14. Redis Cache Schema
+15. Edge SQLite Schema (Local Buffer)
+16. Indexing Strategy
+17. Partitioning & Retention Policy
+18. Entity Relationship Diagram (ASCII)
+================================================================================
+
+
+1. DATABASE ARCHITECTURE OVERVIEW
+-----------------------------------
+
+ILEWS uses a multi-tier persistence strategy designed to optimise for both
+real-time query performance and long-term archiving.
+
+Tier 1 – Hot Data (Redis):
+  In-memory cache for the most recent 24 hours of sensor readings and
+  current risk scores. Provides sub-millisecond response time for
+  dashboard queries.
+
+Tier 2 – Warm Data (TimeScaleDB / PostgreSQL):
+  Primary persistent store for all sensor readings, risk scores, and
+  alert records. TimeScaleDB hypertables provide automatic time-based
+  partitioning, efficient time-range queries, and data compression.
+
+Tier 3 – Cold Archive (GCS + Parquet):
+  Sensor readings older than 90 days are compressed into Parquet files
+  and archived to Google Cloud Storage. Accessible for ML training and
+  forensic analysis but not served in real-time queries.
+
+Edge Tier – Local Buffer (SQLite):
+  Each edge gateway maintains a local SQLite database that buffers sensor
+  readings during internet outages. Synced to cloud on reconnection.
+
+
+2. NAMING CONVENTIONS
+----------------------
+
+  - Tables:      lowercase_snake_case (e.g., sensor_readings)
+  - Columns:     lowercase_snake_case (e.g., risk_score)
+  - Primary Keys: <table_singular>_id (e.g., reading_id, alert_id)
+  - Foreign Keys: Reference table singular + "_id" (e.g., slope_id)
+  - Timestamps:  UTC only; column suffix "_at" (e.g., created_at)
+  - Boolean:     Prefix "is_" or "has_" (e.g., is_active, is_synced)
+  - Indexes:     idx_<table>_<column(s)>
+  - Constraints: chk_<table>_<description>
+  - Sequences:   <table>_<pk>_seq
+
+
+3. TABLE: slopes
+-----------------
+
+Description: Master registry of all monitored slope sites.
+
+CREATE TABLE slopes (
+    slope_id             VARCHAR(20)     PRIMARY KEY,
+    name                 VARCHAR(100)    NOT NULL,
+    description          TEXT,
+    location_name        VARCHAR(200),
+    latitude_centroid    DECIMAL(9,6)    NOT NULL
+                         CONSTRAINT chk_slopes_lat CHECK
+                         (latitude_centroid BETWEEN -90.0 AND 90.0),
+    longitude_centroid   DECIMAL(9,6)    NOT NULL
+                         CONSTRAINT chk_slopes_lon CHECK
+                         (longitude_centroid BETWEEN -180.0 AND 180.0),
+    area_m2              DECIMAL(12,2),
+    zone_polygon         JSONB,          -- Array of [lat, lng] coordinates
+                                         -- defining slope boundary polygon
+    monitoring_status    VARCHAR(20)     NOT NULL DEFAULT 'active'
+                         CONSTRAINT chk_slopes_status CHECK
+                         (monitoring_status IN ('active','inactive','archived')),
+    risk_threshold_red   DECIMAL(4,2)    NOT NULL DEFAULT 0.85,
+    risk_threshold_orange DECIMAL(4,2)   NOT NULL DEFAULT 0.65,
+    risk_threshold_yellow DECIMAL(4,2)   NOT NULL DEFAULT 0.40,
+    created_at           TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    created_by           VARCHAR(100)
+);
+
+-- Columns:
+-- slope_id             : Human-readable unique identifier (e.g., SLOPE_BKT_01)
+-- name                 : Descriptive name of slope
+-- latitude_centroid    : Geographic centre lat (manually entered; no GPS)
+-- longitude_centroid   : Geographic centre lon (manually entered; no GPS)
+-- zone_polygon         : JSON array of lat/lng pairs defining slope boundary
+-- monitoring_status    : active | inactive | archived
+-- risk_threshold_*     : Configurable per-slope risk thresholds
+
+INDEXES:
+  CREATE INDEX idx_slopes_status ON slopes (monitoring_status);
+
+
+4. TABLE: sensor_nodes
+-----------------------
+
+Description: Registry of all physical IoT sensor nodes.
+
+CREATE TABLE sensor_nodes (
+    node_id              VARCHAR(20)     PRIMARY KEY,
+    slope_id             VARCHAR(20)     NOT NULL
+                         REFERENCES slopes(slope_id) ON DELETE RESTRICT,
+    name                 VARCHAR(100),
+    latitude             DECIMAL(9,6)    NOT NULL
+                         CONSTRAINT chk_nodes_lat CHECK
+                         (latitude BETWEEN -90.0 AND 90.0),
+    longitude            DECIMAL(9,6)    NOT NULL
+                         CONSTRAINT chk_nodes_lon CHECK
+                         (longitude BETWEEN -180.0 AND 180.0),
+    depth_config         DECIMAL[]       NOT NULL DEFAULT '{0.5, 1.0, 2.0}',
+    coordinate_source    VARCHAR(100),   -- e.g., "topographic_survey", "manual_estimate"
+    survey_reference     VARCHAR(100),   -- Survey document reference
+    firmware_version     VARCHAR(20),
+    hardware_revision    VARCHAR(20),
+    installed_date       DATE,
+    last_maintenance_at  TIMESTAMPTZ,
+    status               VARCHAR(20)     NOT NULL DEFAULT 'active'
+                         CONSTRAINT chk_nodes_status CHECK
+                         (status IN ('active','inactive','error','decommissioned')),
+    is_deleted           BOOLEAN         NOT NULL DEFAULT FALSE,
+    created_at           TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+
+-- Notes:
+-- latitude/longitude are MANUALLY entered by administrator.
+-- No GPS is used. Coordinates come from survey maps or topographic data.
+-- depth_config is a PostgreSQL array of sensor depths in metres.
+-- is_deleted: soft delete flag; node data retained for forensics.
+
+INDEXES:
+  CREATE INDEX idx_nodes_slope_id ON sensor_nodes (slope_id);
+  CREATE INDEX idx_nodes_status ON sensor_nodes (status) WHERE NOT is_deleted;
+
+
+5. TABLE: sensor_readings (TimeScaleDB Hypertable)
+----------------------------------------------------
+
+Description: Primary time-series table for all sensor readings.
+This is the largest table in the system and is managed as a TimeScaleDB
+hypertable partitioned by timestamp.
+
+CREATE TABLE sensor_readings (
+    reading_id           BIGSERIAL,
+    node_id              VARCHAR(20)     NOT NULL,
+    slope_id             VARCHAR(20)     NOT NULL,
+    timestamp            TIMESTAMPTZ     NOT NULL,  -- Sensor-reported time (UTC)
+    received_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    packet_id            VARCHAR(40),               -- For deduplication
+
+    -- Soil Moisture (up to 5 depths)
+    soil_moisture_d1_pct DECIMAL(5,2),   -- Depth 1 (default 0.5m)
+    soil_moisture_d2_pct DECIMAL(5,2),   -- Depth 2 (default 1.0m)
+    soil_moisture_d3_pct DECIMAL(5,2),   -- Depth 3 (default 2.0m)
+    soil_moisture_d4_pct DECIMAL(5,2),   -- Depth 4 (optional)
+    soil_moisture_d5_pct DECIMAL(5,2),   -- Depth 5 (optional)
+
+    -- Rainfall
+    rainfall_mm          DECIMAL(6,2),   -- Rainfall since last reading
+
+    -- Tilt / Inclinometer
+    tilt_x_deg           DECIMAL(7,4),   -- X-axis tilt in degrees
+    tilt_y_deg           DECIMAL(7,4),   -- Y-axis tilt in degrees
+
+    -- Acceleration (MPU6050)
+    accel_x_ms2          DECIMAL(8,4),
+    accel_y_ms2          DECIMAL(8,4),
+    accel_z_ms2          DECIMAL(8,4),
+
+    -- Vibration (Geophone)
+    vibration_hz         DECIMAL(8,3),   -- Dominant frequency
+    vibration_amplitude  DECIMAL(8,4),   -- Peak amplitude
+
+    -- Hardware Status
+    battery_voltage_v    DECIMAL(5,2),
+    solar_input_w        DECIMAL(5,2),
+    rssi_dbm             SMALLINT,       -- LoRa signal strength
+
+    -- Data Quality
+    data_quality         VARCHAR(20)     NOT NULL DEFAULT 'valid'
+                         CONSTRAINT chk_readings_quality CHECK
+                         (data_quality IN ('valid','suspect','invalid')),
+    quality_flags        JSONB,          -- Details of any quality issues
+    source               VARCHAR(20)     NOT NULL DEFAULT 'lora'
+                         CONSTRAINT chk_readings_source CHECK
+                         (source IN ('lora','edge_buffer','manual','synthetic')),
+
+    PRIMARY KEY (reading_id, timestamp)  -- Composite PK for hypertable
+);
+
+-- Convert to TimeScaleDB hypertable, partitioned by timestamp,
+-- with 1-day chunks for efficient querying:
+SELECT create_hypertable('sensor_readings', 'timestamp',
+                         chunk_time_interval => INTERVAL '1 day');
+
+-- Unique constraint for deduplication:
+CREATE UNIQUE INDEX idx_readings_dedup
+  ON sensor_readings (node_id, timestamp, packet_id);
+
+-- Query indexes:
+CREATE INDEX idx_readings_node_time
+  ON sensor_readings (node_id, timestamp DESC);
+
+CREATE INDEX idx_readings_slope_time
+  ON sensor_readings (slope_id, timestamp DESC);
+
+-- TimeScaleDB compression (for data > 7 days):
+ALTER TABLE sensor_readings SET (
+  timescaledb.compress,
+  timescaledb.compress_orderby = 'timestamp DESC',
+  timescaledb.compress_segmentby = 'node_id'
+);
+SELECT add_compression_policy('sensor_readings', INTERVAL '7 days');
+
+
+6. TABLE: risk_scores
+----------------------
+
+Description: Stores ML-generated risk score for each slope at each
+inference cycle.
+
+CREATE TABLE risk_scores (
+    score_id             BIGSERIAL       PRIMARY KEY,
+    slope_id             VARCHAR(20)     NOT NULL
+                         REFERENCES slopes(slope_id),
+    timestamp            TIMESTAMPTZ     NOT NULL,
+    risk_score           DECIMAL(4,3)    NOT NULL
+                         CONSTRAINT chk_score_range CHECK
+                         (risk_score BETWEEN 0.0 AND 1.0),
+    risk_level           VARCHAR(10)     NOT NULL
+                         CONSTRAINT chk_risk_level CHECK
+                         (risk_level IN ('GREEN','YELLOW','ORANGE','RED')),
+    model_version        VARCHAR(30)     NOT NULL,
+    inference_source     VARCHAR(20)     NOT NULL DEFAULT 'cloud'
+                         CONSTRAINT chk_score_source CHECK
+                         (inference_source IN ('cloud','edge')),
+    feature_window_start TIMESTAMPTZ,   -- Start of input data window
+    feature_window_end   TIMESTAMPTZ,   -- End of input data window
+    contributing_nodes   VARCHAR(20)[],  -- Array of node_ids used in inference
+    model_confidence     DECIMAL(4,3),  -- Model confidence metric (if available)
+    created_at           TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+
+-- Hypertable for time-series efficient querying:
+SELECT create_hypertable('risk_scores', 'timestamp',
+                         chunk_time_interval => INTERVAL '7 days');
+
+INDEXES:
+  CREATE INDEX idx_risk_slope_time ON risk_scores (slope_id, timestamp DESC);
+  CREATE INDEX idx_risk_level ON risk_scores (risk_level, timestamp DESC);
+
+
+7. TABLE: alerts
+-----------------
+
+Description: Records all alert events triggered by the system or manually.
+
+CREATE TABLE alerts (
+    alert_id             VARCHAR(30)     PRIMARY KEY,
+                         -- Format: ALT-YYYY-NNNNNN (e.g., ALT-2026-001247)
+    slope_id             VARCHAR(20)     NOT NULL
+                         REFERENCES slopes(slope_id),
+    trigger_score_id     BIGINT,         -- FK to risk_scores
+    level                VARCHAR(10)     NOT NULL
+                         CONSTRAINT chk_alert_level CHECK
+                         (level IN ('YELLOW','ORANGE','RED')),
+    risk_score           DECIMAL(4,3)    NOT NULL,
+    source               VARCHAR(30)     NOT NULL DEFAULT 'ml_inference'
+                         CONSTRAINT chk_alert_source CHECK
+                         (source IN ('ml_inference','edge_local','manual_override',
+                                     'scheduled_test')),
+    status               VARCHAR(20)     NOT NULL DEFAULT 'active'
+                         CONSTRAINT chk_alert_status CHECK
+                         (status IN ('active','acknowledged','resolved','false_alarm')),
+    triggered_at         TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    acknowledged_by      VARCHAR(100),   -- User ID or email
+    acknowledged_at      TIMESTAMPTZ,
+    acknowledged_notes   TEXT,
+    resolved_at          TIMESTAMPTZ,
+    resolution_notes     TEXT,
+    false_alarm_confirmed BOOLEAN        DEFAULT FALSE,
+    false_alarm_reason   TEXT,
+    created_at           TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+
+INDEXES:
+  CREATE INDEX idx_alerts_slope_time   ON alerts (slope_id, triggered_at DESC);
+  CREATE INDEX idx_alerts_level_status ON alerts (level, status);
+  CREATE INDEX idx_alerts_triggered    ON alerts (triggered_at DESC);
+
+
+8. TABLE: alert_notifications
+------------------------------
+
+Description: Tracks dispatch and delivery status of each notification
+channel for each alert.
+
+CREATE TABLE alert_notifications (
+    notification_id      BIGSERIAL       PRIMARY KEY,
+    alert_id             VARCHAR(30)     NOT NULL
+                         REFERENCES alerts(alert_id) ON DELETE CASCADE,
+    channel              VARCHAR(20)     NOT NULL
+                         CONSTRAINT chk_notif_channel CHECK
+                         (channel IN ('sms','push','siren','email','websocket')),
+    recipient            VARCHAR(200),   -- Phone number, device token, email, etc.
+    status               VARCHAR(20)     NOT NULL DEFAULT 'pending'
+                         CONSTRAINT chk_notif_status CHECK
+                         (status IN ('pending','sent','delivered','failed')),
+    attempt_count        SMALLINT        NOT NULL DEFAULT 0,
+    last_attempt_at      TIMESTAMPTZ,
+    delivered_at         TIMESTAMPTZ,
+    error_message        TEXT,
+    provider_response    JSONB,          -- Raw response from Twilio/FCM/etc.
+    created_at           TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+
+INDEXES:
+  CREATE INDEX idx_notif_alert    ON alert_notifications (alert_id);
+  CREATE INDEX idx_notif_status   ON alert_notifications (status) WHERE status != 'delivered';
+
+
+9. TABLE: users
+----------------
+
+Description: System user accounts and roles.
+
+CREATE TABLE users (
+    user_id              VARCHAR(20)     PRIMARY KEY,
+                         -- Format: USR-NNNN (e.g., USR-0001)
+    email                VARCHAR(200)    NOT NULL UNIQUE,
+    name                 VARCHAR(150)    NOT NULL,
+    role                 VARCHAR(30)     NOT NULL
+                         CONSTRAINT chk_user_role CHECK
+                         (role IN ('system_admin','operator','analyst',
+                                   'government_viewer','read_only')),
+    organisation         VARCHAR(200),
+    phone                VARCHAR(30),    -- E.164 format (e.g., +60123456789)
+    is_active            BOOLEAN         NOT NULL DEFAULT TRUE,
+    is_sms_alert_enabled BOOLEAN         NOT NULL DEFAULT FALSE,
+    is_push_alert_enabled BOOLEAN        NOT NULL DEFAULT FALSE,
+    slope_access         VARCHAR(20)[],  -- NULL = all slopes; array = restricted list
+    last_login_at        TIMESTAMPTZ,
+    password_hash        TEXT,           -- Bcrypt hash; NULL if SSO-only user
+    sso_subject          VARCHAR(200),   -- OAuth2 subject identifier (Keycloak)
+    created_at           TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    created_by           VARCHAR(100)
+);
+
+INDEXES:
+  CREATE INDEX idx_users_email ON users (email);
+  CREATE INDEX idx_users_role  ON users (role) WHERE is_active;
+
+
+10. TABLE: audit_logs
+----------------------
+
+Description: Immutable record of all system actions. Append-only.
+No UPDATE or DELETE operations are permitted on this table.
+
+CREATE TABLE audit_logs (
+    log_id               BIGSERIAL       PRIMARY KEY,
+    timestamp            TIMESTAMPTZ     NOT NULL DEFAULT now(),
+    actor_id             VARCHAR(100),   -- User ID, "system", or "edge-gw"
+    actor_ip             INET,
+    action               VARCHAR(100)    NOT NULL,
+                         -- e.g., "alert.acknowledge", "node.create",
+                         --       "user.role_update", "model.promote"
+    resource_type        VARCHAR(50),    -- e.g., "alert", "node", "user"
+    resource_id          VARCHAR(100),   -- ID of affected resource
+    old_value            JSONB,          -- Previous state (for updates)
+    new_value            JSONB,          -- New state (for creates/updates)
+    result               VARCHAR(20)     NOT NULL
+                         CONSTRAINT chk_audit_result CHECK
+                         (result IN ('success','failure','partial')),
+    error_detail         TEXT,
+    request_id           UUID            -- Correlation ID from API request
+);
+
+-- Make append-only via Row Security Policy:
+ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
+-- Only INSERT is permitted; no UPDATE or DELETE granted to any role.
+
+INDEXES:
+  CREATE INDEX idx_audit_timestamp   ON audit_logs (timestamp DESC);
+  CREATE INDEX idx_audit_actor       ON audit_logs (actor_id, timestamp DESC);
+  CREATE INDEX idx_audit_resource    ON audit_logs (resource_type, resource_id);
+
+
+11. TABLE: node_health_snapshots
+---------------------------------
+
+Description: Periodic snapshots of sensor node hardware health metrics.
+Stored as a hypertable for efficient time-range queries.
+
+CREATE TABLE node_health_snapshots (
+    snapshot_id          BIGSERIAL,
+    node_id              VARCHAR(20)     NOT NULL,
+    timestamp            TIMESTAMPTZ     NOT NULL,
+    connectivity_status  VARCHAR(20)     NOT NULL
+                         CONSTRAINT chk_health_conn CHECK
+                         (connectivity_status IN ('online','offline','degraded')),
+    battery_voltage_v    DECIMAL(5,2),
+    battery_pct          SMALLINT,
+    solar_input_w        DECIMAL(5,2),
+    enclosure_temp_c     DECIMAL(5,2),
+    packet_success_1h    SMALLINT,       -- Packets successfully sent in last hour
+    packet_total_1h      SMALLINT,       -- Total packets attempted in last hour
+    rssi_dbm_avg         SMALLINT,       -- Average RSSI over last hour
+    firmware_version     VARCHAR(20),
+    PRIMARY KEY (snapshot_id, timestamp)
+);
+
+SELECT create_hypertable('node_health_snapshots', 'timestamp',
+                         chunk_time_interval => INTERVAL '7 days');
+
+INDEXES:
+  CREATE INDEX idx_health_node_time
+    ON node_health_snapshots (node_id, timestamp DESC);
+
+
+12. TABLE: model_registry
+--------------------------
+
+Description: Tracks all ML model versions, their performance metrics,
+and deployment status. Supplements MLflow with critical DB-side metadata.
+
+CREATE TABLE model_registry (
+    registry_id          SERIAL          PRIMARY KEY,
+    model_version        VARCHAR(30)     NOT NULL UNIQUE,
+                         -- e.g., "lstm_v3.1.2"
+    mlflow_run_id        VARCHAR(100),
+    model_type           VARCHAR(50)     NOT NULL,
+                         -- e.g., "LSTM", "Autoencoder", "RandomForest"
+    training_start       DATE            NOT NULL,
+    training_end         DATE            NOT NULL,
+    training_samples     INTEGER,
+    auc_roc              DECIMAL(5,4),
+    precision_score      DECIMAL(5,4),
+    recall_score         DECIMAL(5,4),
+    f1_score             DECIMAL(5,4),
+    false_alarm_rate_pct DECIMAL(5,2),
+    lead_time_avg_min    DECIMAL(7,2),
+    lead_time_min_min    DECIMAL(7,2),
+    deployment_status    VARCHAR(20)     NOT NULL DEFAULT 'trained'
+                         CONSTRAINT chk_model_status CHECK
+                         (deployment_status IN ('trained','staging','production',
+                                                'archived','rejected')),
+    deployed_at          TIMESTAMPTZ,
+    deployed_by          VARCHAR(100),
+    archived_at          TIMESTAMPTZ,
+    notes                TEXT,
+    created_at           TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+
+INDEXES:
+  CREATE INDEX idx_model_status ON model_registry (deployment_status);
+
+
+13. TABLE: reports
+-------------------
+
+Description: Records of generated reports and their download links.
+
+CREATE TABLE reports (
+    report_id            VARCHAR(20)     PRIMARY KEY,
+                         -- Format: RPT-YYYY-NNNNN
+    report_type          VARCHAR(50)     NOT NULL,
+    requested_by         VARCHAR(100)    NOT NULL,
+    slope_ids            VARCHAR(20)[],
+    start_date           DATE,
+    end_date             DATE,
+    output_format        VARCHAR(10)     NOT NULL DEFAULT 'pdf'
+                         CONSTRAINT chk_report_format CHECK
+                         (output_format IN ('pdf','csv','json')),
+    status               VARCHAR(20)     NOT NULL DEFAULT 'queued'
+                         CONSTRAINT chk_report_status CHECK
+                         (status IN ('queued','generating','ready','failed')),
+    file_path            TEXT,           -- GCS path to generated file
+    download_url         TEXT,           -- Signed URL for download
+    url_expires_at       TIMESTAMPTZ,
+    file_size_bytes      BIGINT,
+    error_message        TEXT,
+    generated_at         TIMESTAMPTZ,
+    created_at           TIMESTAMPTZ     NOT NULL DEFAULT now()
+);
+
+INDEXES:
+  CREATE INDEX idx_reports_status ON reports (status, created_at DESC);
+  CREATE INDEX idx_reports_user   ON reports (requested_by, created_at DESC);
+
+
+14. REDIS CACHE SCHEMA
+-----------------------
+
+Redis is used as a hot-data cache layer. Keys are structured for
+clarity and efficient retrieval.
+
+14.1 Current Risk Level (per slope)
+    Key:    risk:{slope_id}:current
+    Type:   Hash
+    Fields:
+      risk_level   : "ORANGE"
+      risk_score   : "0.72"
+      computed_at  : "2026-02-28T08:15:00Z"
+      model_version: "lstm_v3.1.2"
+    TTL: 20 minutes (refreshed on each ML inference)
+
+    Example: HGETALL risk:SLOPE_BKT_01:current
+
+14.2 Latest Sensor Reading (per node)
+    Key:    node:{node_id}:latest
+    Type:   Hash
+    Fields: All sensor reading fields (sm1, sm2, sm3, rn, tx, ty, ...)
+    TTL: 15 minutes (refreshed on each new packet)
+
+    Example: HGETALL node:A1:latest
+
+14.3 Active Alerts (set of alert IDs)
+    Key:    alerts:active
+    Type:   Sorted Set (score = triggered_at epoch)
+    Members: alert_id strings
+    TTL: No TTL (managed by application logic)
+
+    Example: ZRANGE alerts:active 0 -1 WITHSCORES
+
+14.4 System Health Status
+    Key:    system:health:latest
+    Type:   Hash
+    Fields: overall, mqtt_broker, etl_processor, ml_inference, ...
+    TTL: 5 minutes
+
+14.5 Dashboard Map Snapshot
+    Key:    map:overview:snapshot
+    Type:   String (serialised JSON)
+    Content: Full /v1/map/data response payload
+    TTL: 90 seconds (refreshed by background job)
+
+    Example: GET map:overview:snapshot
+
+
+15. EDGE SQLITE SCHEMA (Local Buffer)
+---------------------------------------
+
+Each edge gateway runs a local SQLite database at:
+  /var/ilews/gateway/ilews_buffer.db
+
+This schema is intentionally simple for embedded operation.
+
+-- Raw readings buffer (written locally, synced to cloud)
+CREATE TABLE raw_readings (
+    id           INTEGER  PRIMARY KEY AUTOINCREMENT,
+    node_id      TEXT     NOT NULL,
+    packet_data  TEXT     NOT NULL,  -- Full JSON packet string
+    received_at  TEXT     NOT NULL,  -- ISO 8601 string
+    is_synced    INTEGER  NOT NULL DEFAULT 0,  -- 0=pending, 1=synced
+    sync_attempts INTEGER NOT NULL DEFAULT 0,
+    last_sync_at TEXT
+);
+
+-- Local alerts triggered by edge AI
+CREATE TABLE local_alerts (
+    id            INTEGER  PRIMARY KEY AUTOINCREMENT,
+    slope_id      TEXT     NOT NULL,
+    risk_score    REAL     NOT NULL,
+    triggered_at  TEXT     NOT NULL,
+    siren_activated INTEGER NOT NULL DEFAULT 0,
+    is_synced     INTEGER  NOT NULL DEFAULT 0
+);
+
+-- Gateway configuration cache
+CREATE TABLE config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+SQLite Indexes:
+  CREATE INDEX idx_raw_unsynced ON raw_readings (is_synced) WHERE is_synced = 0;
+  CREATE INDEX idx_raw_node     ON raw_readings (node_id, received_at);
+
+
+16. INDEXING STRATEGY
+----------------------
+
+Primary indexing objectives:
+  a. Fast dashboard queries (latest risk per slope, latest readings per node)
+  b. Fast time-range queries for historical data
+  c. Efficient deduplication during ingestion
+  d. Audit log lookups by actor, resource, and timestamp
+
+Critical Indexes Summary:
+
+  sensor_readings:
+    - (node_id, timestamp DESC)          -- Node detail view
+    - (slope_id, timestamp DESC)         -- Slope-level queries
+    - (node_id, timestamp, packet_id)    -- Deduplication (unique)
+
+  risk_scores:
+    - (slope_id, timestamp DESC)         -- Current risk for slope
+
+  alerts:
+    - (slope_id, triggered_at DESC)      -- Alert history per slope
+    - (level, status)                    -- Filtered alert queries
+
+  audit_logs:
+    - (timestamp DESC)                   -- Chronological log browsing
+    - (actor_id, timestamp DESC)         -- Audit by user
+    - (resource_type, resource_id)       -- Audit by resource
+
+TimeScaleDB automatically creates optimised indexes on the partitioning
+column (timestamp) for all hypertables. Do not manually index timestamp
+alone on hypertables.
+
+
+17. PARTITIONING & RETENTION POLICY
+--------------------------------------
+
+sensor_readings (TimeScaleDB):
+  - Chunk interval: 1 day per node partition
+  - Compression: After 7 days (chunk-level compression)
+  - Archive to GCS Parquet: After 90 days
+  - Delete from PostgreSQL: After 90 days (post-archive verification)
+  - Minimum retention: 7 years (in GCS)
+
+risk_scores (TimeScaleDB):
+  - Chunk interval: 7 days
+  - Compression: After 30 days
+  - Archive: After 180 days
+  - Retention: 7 years (in GCS)
+
+audit_logs:
+  - No partitioning (moderate growth rate)
+  - No deletion ever; archived to GCS annually
+  - Retention: 7 years minimum
+
+node_health_snapshots:
+  - Chunk interval: 7 days
+  - Compression: After 30 days
+  - Retention: 2 years in database, 7 years in GCS
+
+Automated Retention Jobs:
+  -- TimeScaleDB policy for sensor_readings archival:
+  SELECT add_retention_policy('sensor_readings',
+                               INTERVAL '90 days',
+                               schedule_interval => INTERVAL '1 day');
+
+
+18. ENTITY RELATIONSHIP DIAGRAM (ASCII)
+-----------------------------------------
+
+  +------------+       +-----------------+
+  |   slopes   |1-----*| sensor_nodes    |
+  +------------+       +-----------------+
+       |1                     |1
+       |                      |
+       |*                     |*
+  +------------+       +-----------------+
+  | risk_scores|       | sensor_readings |
+  +------------+       +-----------------+
+       |                      |
+       |1                     |
+       |                      |
+       |*                 (also links)
+  +------------+              |
+  |   alerts   |<-------------+
+  +------------+       (alerts triggered by reading thresholds)
+       |1
+       |*
+  +-----------------------+
+  | alert_notifications   |
+  +-----------------------+
+
+  +------------+       +-----------------+
+  |   users    |       |  audit_logs     |
+  +------------+       +-----------------+
+       |1              (actor_id links to user_id; loose coupling)
+       |               (resource_id can reference any table)
+  (acknowledges alerts)
+
+  +------------------+
+  |  model_registry  |
+  +------------------+
+  (version linked in risk_scores.model_version; no FK constraint
+   to allow edge/cloud model version divergence)
+
+  +------------+
+  |  reports   |
+  +------------+
+  (requested_by links to users.user_id; no FK for simplicity)
+
+================================================================================
+END OF DOCUMENT – Database Schema Design v1.0
+================================================================================

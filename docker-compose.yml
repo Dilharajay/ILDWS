@@ -1,0 +1,165 @@
+# ILEWS – Docker Compose for local development
+version: "3.9"
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: ilews-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ilews
+      POSTGRES_USER: ilews_dev
+      POSTGRES_PASSWORD: ilews_dev_pass
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ilews_dev -d ilews"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: ilews-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: ilews-mosquitto
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquittodata:/mosquitto/data
+      - mosquittolog:/mosquitto/log
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.0
+    container_name: ilews-mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlflow-data:/mlflow
+    command: >
+      mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --backend-store-uri sqlite:///mlflow/mlflow.db
+        --default-artifact-root /mlflow/artifacts
+
+  fastapi-backend:
+    build:
+      context: ./cloud/services/fastapi-backend
+      dockerfile: Dockerfile
+    container_name: ilews-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./cloud/services/fastapi-backend/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  etl-processor:
+    build:
+      context: ./cloud/services/etl-processor
+      dockerfile: Dockerfile
+    container_name: ilews-etl
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./cloud/services/etl-processor/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  notification-svc:
+    build:
+      context: ./cloud/services/notification-svc
+      dockerfile: Dockerfile
+    container_name: ilews-notification
+    ports:
+      - "8002:8002"
+    env_file:
+      - ./cloud/services/notification-svc/.env
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  ml-inference:
+    build:
+      context: ./cloud/services/ml-inference
+      dockerfile: Dockerfile
+    container_name: ilews-ml-inference
+    ports:
+      - "8003:8003"
+    env_file:
+      - ./cloud/services/ml-inference/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: ilews-dashboard
+    ports:
+      - "3080:80"
+    depends_on:
+      fastapi-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  mosquittodata:
+  mosquittolog:

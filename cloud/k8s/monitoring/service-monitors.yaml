@@ -1,0 +1,63 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ilews-fastapi
+  namespace: ilews-production
+  labels:
+    app: fastapi-backend
+spec:
+  selector:
+    matchLabels:
+      app: fastapi-backend
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ilews-etl
+  namespace: ilews-production
+  labels:
+    app: etl-processor
+spec:
+  selector:
+    matchLabels:
+      app: etl-processor
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ilews-ml-inference
+  namespace: ilews-production
+  labels:
+    app: ml-inference
+spec:
+  selector:
+    matchLabels:
+      app: ml-inference
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ilews-notification
+  namespace: ilews-production
+  labels:
+    app: notification-svc
+spec:
+  selector:
+    matchLabels:
+      app: notification-svc
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
