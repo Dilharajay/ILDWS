@@ -2,7 +2,9 @@
 
 A mission-critical, real-time IoT and AI-driven platform that predicts and detects slope failures using geotechnical sensors, edge computing, and cloud-based deep learning. ILEWS monitors soil moisture, tilt, rainfall, and ground vibration across multiple slopes, runs LSTM-based predictive models both on-edge and in the cloud, and delivers multi-channel alerts (SMS, push, siren) with a target false alarm rate below 5% and lead time exceeding 2 hours.
 
-The system operates across three layers — ESP32 sensor nodes communicating via LoRaWAN, Raspberry Pi edge gateways running local ML inference with offline alerting capability, and a GCP-hosted Kubernetes microservice backend with a React dashboard. All sensor node coordinates are set by manual topographic survey entry (no GPS hardware). Data is retained for 7 years minimum for post-event forensic analysis and government audit compliance.
+Drawing on global best practices for Landslide Early Warning Systems (LEWS), ILEWS supplements advanced Deep Learning predictions with hardcoded empirical rainfall/moisture thresholds as a failsafe, and supports future expansion to deep subsurface piezometer monitoring.
+
+The system operates across three layers — ESP32 sensor nodes communicating via LoRaWAN (for low-power, long-range transmission through foliage), Raspberry Pi edge gateways running local ML inference with offline alerting capability, and a GCP-hosted Kubernetes microservice backend with a React dashboard. All sensor node coordinates are set by manual topographic survey entry (no GPS hardware). Data is retained for 7 years minimum for post-event forensic analysis and government audit compliance.
 
 ## Architecture
 
@@ -10,24 +12,24 @@ The system operates across three layers — ESP32 sensor nodes communicating via
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        CLOUD LAYER (GCP/GKE)                        │
 │                                                                     │
-│  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌───────────────────┐  │
-│  │ FastAPI   │  │ ETL       │  │ ML       │  │ Notification      │  │
-│  │ Backend   │  │ Processor │  │ Inference│  │ Service           │  │
-│  └────┬─────┘  └─────┬─────┘  └────┬─────┘  └────────┬──────────┘  │
-│       │              │              │                  │             │
-│  ┌────┴──────────────┴──────────────┴──────────────────┴──────────┐  │
-│  │              PostgreSQL 16 + TimescaleDB  │  Redis             │  │
-│  └───────────────────────────────────────────────────────────────┘  │
+│  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌───────────────────┐   │
+│  │ FastAPI  │  │ ETL       │  │ ML       │  │ Notification      │   │
+│  │ Backend  │  │ Processor │  │ Inference│  │ Service           │   │
+│  └────┬─────┘  └─────┬─────┘  └────┬─────┘  └────────┬──────────┘   │
+│       │              │              │                  │            │
+│  ┌────┴──────────────┴──────────────┴──────────────────┴──────────┐ │
+│  │        PostgreSQL 16 + TimescaleDB  │  Redis Streams           │ │
+│  └────────────────────────────────────────────────────────────────┘ │
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                 React Dashboard (Vite + Tailwind)             │   │
+│  │                 React Dashboard (Vite + Tailwind)            │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └──────────────────────────────┬──────────────────────────────────────┘
-                               │ MQTT / HTTPS
+                               │ MQTT (TLS) / HTTPS
                     ┌──────────┴──────────┐
                     │   EDGE LAYER        │
                     │   Raspberry Pi      │
-                    │   • LoRaWAN Server  │
+                    │   • ChirpStack NS   │
                     │   • SQLite Buffer   │
                     │   • TFLite Inference│
                     │   • Local Siren     │
