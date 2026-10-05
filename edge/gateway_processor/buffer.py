@@ -2,17 +2,20 @@
 
 import os
 import sqlite3
+import threading
 from typing import Optional
 
 from loguru import logger
 
 from config import settings
 
+_db_lock = threading.Lock()
+
 
 def get_connection(db_path: str = None) -> sqlite3.Connection:
     """Get SQLite connection."""
     path = db_path or settings.SQLITE_PATH
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
@@ -26,8 +29,9 @@ def init_db(conn: sqlite3.Connection = None) -> sqlite3.Connection:
     schema_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "schema.sql"
     )
-    with open(schema_path, "r") as f:
-        conn.executescript(f.read())
+    with _db_lock:
+        with open(schema_path, "r") as f:
+            conn.executescript(f.read())
 
     logger.info(f"SQLite buffer initialized: {settings.SQLITE_PATH}")
     return conn
@@ -40,27 +44,29 @@ def write_reading(
 
     Returns the row ID of the inserted record.
     """
-    cursor = conn.execute(
-        "INSERT INTO raw_readings (node_id, payload_json) VALUES (?, ?)",
-        (node_id, packet_json),
-    )
-    conn.commit()
-    return cursor.lastrowid
+    with _db_lock:
+        cursor = conn.execute(
+            "INSERT INTO raw_readings (node_id, payload_json) VALUES (?, ?)",
+            (node_id, packet_json),
+        )
+        conn.commit()
+        return cursor.lastrowid
 
 
 def get_unsynced(
     conn: sqlite3.Connection, limit: int = 50
 ) -> list[dict]:
     """Get unsynced readings ordered by received_at."""
-    cursor = conn.execute(
-        "SELECT id, node_id, payload_json, received_at "
-        "FROM raw_readings "
-        "WHERE is_synced = 0 "
-        "ORDER BY received_at ASC "
-        "LIMIT ?",
-        (limit,),
-    )
-    return [dict(row) for row in cursor.fetchall()]
+    with _db_lock:
+        cursor = conn.execute(
+            "SELECT id, node_id, payload_json, received_at "
+            "FROM raw_readings "
+            "WHERE is_synced = 0 "
+            "ORDER BY received_at ASC "
+            "LIMIT ?",
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
 
 def mark_synced(conn: sqlite3.Connection, ids: list[int]) -> int:
@@ -69,22 +75,24 @@ def mark_synced(conn: sqlite3.Connection, ids: list[int]) -> int:
         return 0
 
     placeholders = ",".join("?" * len(ids))
-    cursor = conn.execute(
-        f"UPDATE raw_readings "
-        f"SET is_synced = 1, synced_at = CURRENT_TIMESTAMP "
-        f"WHERE id IN ({placeholders})",
-        ids,
-    )
-    conn.commit()
-    return cursor.rowcount
+    with _db_lock:
+        cursor = conn.execute(
+            f"UPDATE raw_readings "
+            f"SET is_synced = 1, synced_at = CURRENT_TIMESTAMP "
+            f"WHERE id IN ({placeholders})",
+            ids,
+        )
+        conn.commit()
+        return cursor.rowcount
 
 
 def get_pending_count(conn: sqlite3.Connection) -> int:
     """Return count of unsynced records."""
-    cursor = conn.execute(
-        "SELECT COUNT(*) FROM raw_readings WHERE is_synced = 0"
-    )
-    return cursor.fetchone()[0]
+    with _db_lock:
+        cursor = conn.execute(
+            "SELECT COUNT(*) FROM raw_readings WHERE is_synced = 0"
+        )
+        return cursor.fetchone()[0]
 
 
 def log_sync(
@@ -94,12 +102,13 @@ def log_sync(
     failed: int,
 ) -> None:
     """Log a sync operation."""
-    conn.execute(
-        "INSERT INTO sync_log (batch_size, success_count, failed_count) "
-        "VALUES (?, ?, ?)",
-        (batch_size, success, failed),
-    )
-    conn.commit()
+    with _db_lock:
+        conn.execute(
+            "INSERT INTO sync_log (batch_size, success_count, failed_count) "
+            "VALUES (?, ?, ?)",
+            (batch_size, success, failed),
+        )
+        conn.commit()
 
 
 def log_local_alert(
@@ -109,10 +118,22 @@ def log_local_alert(
     siren_activated: bool = False,
 ) -> int:
     """Log a local alert to SQLite."""
-    cursor = conn.execute(
-        "INSERT INTO local_alerts (risk_score, risk_level, siren_activated) "
-        "VALUES (?, ?, ?)",
-        (risk_score, risk_level, 1 if siren_activated else 0),
-    )
-    conn.commit()
-    return cursor.lastrowid
+    with _db_lock:
+        cursor = conn.execute(
+            "INSERT INTO local_alerts (risk_score, risk_level, siren_activated) "
+            "VALUES (?, ?, ?)",
+            (risk_score, risk_level, 1 if siren_activated else 0),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+def prune_synced_readings(conn: sqlite3.Connection, retention_days: int = 30) -> int:
+    """Delete synced records older than retention_days."""
+    with _db_lock:
+        cursor = conn.execute(
+            "DELETE FROM raw_readings WHERE is_synced = 1 "
+            "AND synced_at < datetime('now', ?)",
+            (f"-{retention_days} days",),
+        )
+        conn.commit()
+        return cursor.rowcount

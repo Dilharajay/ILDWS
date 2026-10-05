@@ -162,7 +162,7 @@ async def main():
     await init_http_client()
 
     # Set up message processing callback
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     set_message_callback(process_message)
 
     # Start MQTT client
@@ -179,14 +179,21 @@ async def main():
     # Wait for shutdown signal
     shutdown_event = asyncio.Event()
 
-    def _signal_handler():
+    def _signal_handler(*args):
         logger.info("Shutdown signal received")
-        shutdown_event.set()
+        loop.call_soon_threadsafe(shutdown_event.set)
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _signal_handler)
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, _signal_handler)
+    else:
+        signal.signal(signal.SIGINT, _signal_handler)
+        signal.signal(signal.SIGTERM, _signal_handler)
 
-    await shutdown_event.wait()
+    try:
+        await shutdown_event.wait()
+    except asyncio.CancelledError:
+        pass
 
     # Cleanup
     logger.info("Shutting down...")

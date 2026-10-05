@@ -76,13 +76,21 @@ def generate_sensor_data(
 
     return {
         "node_id": node_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "soil_moisture": round(soil_moisture, 1),
-        "tilt_x": round(tilt_x, 2),
-        "tilt_y": round(tilt_y, 2),
-        "rainfall_mm": round(rainfall, 1),
-        "vibration_freq": round(vibration, 3),
-        "battery_voltage": round(battery, 2),
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "sm1": round(soil_moisture, 1),
+        "sm2": round(max(0, soil_moisture - 5), 1),
+        "sm3": round(max(0, soil_moisture - 10), 1),
+        "sm4": round(max(0, soil_moisture - 15), 1),
+        "sm5": round(max(0, soil_moisture - 20), 1),
+        "tx": round(tilt_x, 2),
+        "ty": round(tilt_y, 2),
+        "ax": round(math.sin(progress), 2),
+        "ay": round(math.cos(progress), 2),
+        "az": 1.0,
+        "rn": round(rainfall, 1),
+        "vhz": round(vibration, 3),
+        "vamp": round(10.0 * progress, 1),
+        "bat": round(battery, 2),
         "rssi": -75 - int(10 * progress),
         "snr": 8.0 - (3.0 * progress),
     }
@@ -92,7 +100,7 @@ def run_simulation(args):
     """Execute the landslide simulation."""
     mqtt_host = os.getenv("MQTT_HOST", "localhost")
     mqtt_port = int(os.getenv("MQTT_PORT", "1883"))
-    topic_prefix = os.getenv("MQTT_TOPIC_PREFIX", "ilews/sensors")
+    topic_prefix = os.getenv("MQTT_TOPIC_PREFIX", "sensors")
 
     node_ids = [f"{args.slope_id}-NODE-{i:03d}" for i in range(1, 4)]
 
@@ -153,7 +161,8 @@ def run_simulation(args):
             # Publish data for each node
             for node_id in node_ids:
                 data = generate_sensor_data(node_id, progress)
-                topic = f"{topic_prefix}/{node_id}/data"
+                # Topic expects slope_id, not node_id: sensors/{slope_id}/data
+                topic = f"{topic_prefix}/{args.slope_id}/data"
                 payload = json.dumps(data)
                 client.publish(topic, payload, qos=1)
 

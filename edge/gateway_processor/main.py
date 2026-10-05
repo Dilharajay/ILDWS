@@ -10,6 +10,7 @@ Systemd-friendly service that:
 
 import json
 import signal
+import os
 import sys
 import time
 import threading
@@ -17,7 +18,7 @@ import threading
 from loguru import logger
 
 from config import settings
-from buffer import init_db, write_reading, get_pending_count
+from buffer import init_db, write_reading, get_pending_count, prune_synced_readings
 from validator import validate_packet
 from mqtt_local import create_local_mqtt_client, start_local_mqtt, set_packet_callback
 from cloud_sync import CloudSyncAgent
@@ -57,23 +58,14 @@ def on_sensor_packet(node_id: str, payload_json: str):
         logger.error(f"Error processing packet from {node_id}: {e}")
 
 
-def run_inference_cycle():
-    """Run edge inference if local_inference module is available."""
+def run_inference_cycle(engine, trigger, build_edge_features_fn):
+    """Run edge inference cycle."""
     try:
-        sys.path.insert(0, "../local_inference")
-        from inference_engine import EdgeInferenceEngine
-        from feature_builder import build_edge_features
-        from alert_trigger import AlertTrigger
-
-        engine = EdgeInferenceEngine()
-        if not engine.is_model_loaded():
-            engine.load_model(settings.MODEL_PATH)
-
-        if not engine.is_model_loaded():
-            logger.debug("No model loaded, skipping inference")
+        if not engine or not trigger or not engine.is_model_loaded():
+            logger.debug("Engine not ready, skipping inference")
             return
 
-        features = build_edge_features(
+        features = build_edge_features_fn(
             _db_conn, settings.SLOPE_ID, window_minutes=30
         )
         if features is None:
@@ -86,11 +78,7 @@ def run_inference_cycle():
             f"for slope {settings.SLOPE_ID}"
         )
 
-        trigger = AlertTrigger(_db_conn)
         trigger.check_and_trigger(risk_score)
-
-    except ImportError:
-        logger.debug("local_inference not available, skipping edge ML")
     except Exception as e:
         logger.error(f"Edge inference error: {e}")
 
@@ -132,20 +120,42 @@ def main():
     else:
         logger.warning("No internet, cloud sync deferred")
 
+    # Initialize Inference Engine
+    engine = None
+    trigger = None
+    build_edge_features = None
+    try:
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../local_inference")))
+        from inference_engine import EdgeInferenceEngine
+        from feature_builder import build_edge_features as feature_fn, load_scaler_config
+        from alert_trigger import AlertTrigger
+        
+        load_scaler_config(settings.SCALER_CONFIG_PATH)
+        engine = EdgeInferenceEngine()
+        engine.load_model(settings.MODEL_PATH)
+        trigger = AlertTrigger(_db_conn)
+        build_edge_features = feature_fn
+        logger.info("Edge inference engine and trigger initialized successfully.")
+    except Exception as e:
+        logger.error(f"Failed to initialize edge inference: {e}")
+
     # Main loop
     inference_counter = 0
+    prune_counter = 0
     inference_interval = settings.INFERENCE_INTERVAL_SECONDS
+    prune_interval = 86400  # Prune once a day
 
     logger.info("Edge gateway running. Press Ctrl+C to stop.")
 
     while not _shutdown_event.is_set():
         _shutdown_event.wait(timeout=1)
         inference_counter += 1
+        prune_counter += 1
 
         # Run inference every INFERENCE_INTERVAL_SECONDS
         if inference_counter >= inference_interval:
             inference_counter = 0
-            run_inference_cycle()
+            run_inference_cycle(engine, trigger, build_edge_features)
 
             # Log buffer status
             pending = get_pending_count(_db_conn)
@@ -156,6 +166,15 @@ def main():
             if not sync_agent.connected and check_internet():
                 logger.info("Internet restored, restarting cloud sync")
                 sync_agent.start()
+        
+        # Prune daily
+        if prune_counter >= prune_interval:
+            prune_counter = 0
+            try:
+                pruned = prune_synced_readings(_db_conn, retention_days=3)
+                logger.info(f"Pruned {pruned} old synced records from SQLite.")
+            except Exception as e:
+                logger.error(f"Failed to prune SQLite: {e}")
 
     # Graceful shutdown
     logger.info("Shutting down...")

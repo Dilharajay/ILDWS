@@ -1,9 +1,13 @@
 """ILEWS backend – FastAPI application entry point."""
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+import redis.asyncio as redis
 
 from app.config import settings
+from app.database import async_session_factory
 from app.routers import auth
 from app.routers import slopes as slopes_router
 from app.routers import nodes as nodes_router
@@ -31,16 +35,21 @@ app = FastAPI(
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(Exception, generic_exception_handler)
 
-# CORS – permissive in development, should be locked down in production
-if settings.ENVIRONMENT == "development":
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    app.add_middleware(MetricsMiddleware)
+# CORS – locked down unless overridden
+origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "https://dashboard.ilews.gov"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"] if settings.ENVIRONMENT == "development" else origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.add_middleware(MetricsMiddleware)
 
 
 app.include_router(auth.router)
@@ -59,4 +68,20 @@ app.include_router(metrics_router)
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    checks = {"api": "ok"}
+    try:
+        async with async_session_factory() as session:
+            await session.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception:
+        checks["database"] = "error"
+    
+    try:
+        r = redis.from_url(settings.REDIS_URL)
+        await r.ping()
+        checks["redis"] = "ok"
+    except Exception:
+        checks["redis"] = "error"
+    
+    status_code = 200 if all(v == "ok" for v in checks.values()) else 503
+    return JSONResponse(checks, status_code=status_code)
